@@ -8,7 +8,7 @@
   G54 patch has no booted reference.
 * With no G54 patch, the G54 patchset gate must equal ruby's (line K0).
 * Tracked files: no images, archives, IPSWs, KDKs, dumps or keys.
-* patches/: only *.patch plus README.md.
+* patches/: only *.patch plus README.md; facts/ (collected from a phone) is never tracked.
 """
 from __future__ import annotations
 
@@ -81,6 +81,8 @@ def main() -> int:
     for name in tracked():
         if FORBIDDEN.search(name):
             problems.append(f"forbidden file type in the repository: {name}")
+        if name.startswith("facts/"):
+            problems.append(f"collected device facts must stay local: {name}")
         if name.startswith("patches/") and not (name.endswith(".patch") or name == "patches/README.md"):
             problems.append(f"unexpected file in patches/: {name}")
     workflow = (ROOT / ".github/workflows/kernel.yml").read_text()

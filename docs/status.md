@@ -24,8 +24,10 @@ direct kernels.
 
 ## Next concrete steps
 
-1. M1 read-only facts (owner, with the phone): fill device-facts.md. This is
-   now the critical path; nothing device-specific can be written before it.
+1. M1 read-only facts (owner, with the phone): run `scripts/m1_facts.py adb`,
+   then `fastboot`, and the offline `bootimg` analysis on the matching stock
+   images; fill device-facts.md. This is now the critical path; nothing
+   device-specific can be written before it.
 2. Boot-image format work once the header version and DTB location are known
    (ruby's `tools/image` covers header v2 only).
 3. First G54 patch: the early framebuffer address/stride from M1, with the
