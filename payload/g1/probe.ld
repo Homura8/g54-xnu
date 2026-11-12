@@ -13,5 +13,7 @@ SECTIONS
     . = ALIGN(16);
     __bss_end = .;
     .stack (NOLOAD) : { *(.stack) }
+    . = ALIGN(0x1000);
+    _end = .;   /* an XNU payload, if any, starts at the next 4 KiB boundary */
     /DISCARD/ : { *(.comment*) *(.note*) *(.eh_frame*) }
 }

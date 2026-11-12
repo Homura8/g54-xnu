@@ -67,6 +67,9 @@ typedef unsigned long u64;
 #ifndef PHASE2_S
 #define PHASE2_S 2
 #endif
+#ifndef LOADER_S
+#define LOADER_S 8   /* time to photograph the info screen before XNU */
+#endif
 
 #define FDT_MAGIC       0xd00dfeedU
 #define FDT_BEGIN_NODE  1U
@@ -523,6 +526,120 @@ static void dump_engines(void)
     puts_("\n", WHITE);
 }
 
+
+/* ---- XNU loader (SWEETXNU payload, topaz tools/mkpayload.py format) ---- */
+/*
+ * Layout (from mkpayload.py at the pinned ios-topaz BASE_SHA): "SWEETXNU",
+ * u32 version=1, nsegs; u64 virt_base, entry_va, adt_off, adt_size,
+ * kernel_end_va, phys_base, mem_size; char cmdline[608]; then at 0x2a8
+ * nsegs x {u64 vmaddr, vmsize, file_off, file_size}. boot_args is
+ * pexpert/pexpert/arm64/boot.h Revision 2 / Version 2 (736 bytes).
+ */
+#define PL_SEGS     0x2a8
+#define BOOT_LINE   608
+#define PAGE16K     0x4000UL
+#define LCD_FB      0xfeac6000UL   /* visible LK layer (E4) */
+#define LCD_PITCH   4320U
+
+static u64 rd64(u64 a) { return *(volatile u64 *)a; }
+static void wr64(u64 a, u64 v) { *(volatile u64 *)a = v; }
+
+static u64 find_payload(u64 from)
+{
+    for (u64 a = (from + 0xfff) & ~0xfffUL; a < from + 0x200000; a += 0x1000) {
+        const volatile u8 *m = (const volatile u8 *)a;
+        if (m[0] == 'S' && m[1] == 'W' && m[2] == 'E' && m[3] == 'E' && m[4] == 'T' &&
+            m[5] == 'X' && m[6] == 'N' && m[7] == 'U')
+            return a;
+    }
+    return 0;
+}
+
+static void copy64(u64 dst, u64 src, u64 n)
+{
+    for (u64 i = 0; i < (n + 7) / 8; i++) {
+        wr64(dst + 8 * i, rd64(src + 8 * i));
+        if ((i & 0x3ffff) == 0)
+            kick();
+    }
+}
+
+static void zero64(u64 dst, u64 n)
+{
+    for (u64 i = 0; i < n / 8; i++) {
+        wr64(dst + 8 * i, 0);
+        if ((i & 0x3ffff) == 0)
+            kick();
+    }
+}
+
+/* Returns only on error, with a reason. */
+static const char *load_xnu(u64 pl)
+{
+    u32 version = r32(pl + 8), nsegs = r32(pl + 12);
+    u64 virt_base = rd64(pl + 0x10), entry_va = rd64(pl + 0x18);
+    u64 adt_off = rd64(pl + 0x20), adt_size = rd64(pl + 0x28), kend = rd64(pl + 0x30);
+    u64 phys_base = rd64(pl + 0x38), mem_size = rd64(pl + 0x40);
+    if (version != 1 || nsegs == 0 || nsegs > 32 || (adt_off & 7))
+        return "BAD PAYLOAD HEADER";
+    /* The G54 window chosen from E4: inside free 0x140000000+0xffe00000. */
+    if (phys_base < 0x140000000UL || phys_base + mem_size > 0x23fe00000UL)
+        return "PHYS WINDOW NOT IN FREE RAM";
+    u64 off = phys_base - virt_base;  /* pa = va + off */
+
+    for (u32 i = 0; i < nsegs; i++) {
+        u64 s = pl + PL_SEGS + 32 * i;
+        u64 va = rd64(s), vmsize = rd64(s + 8), foff = rd64(s + 16), fsize = rd64(s + 24);
+        u64 dst = va + off;
+        if (dst < phys_base || dst + vmsize > phys_base + mem_size || fsize > vmsize)
+            return "SEGMENT OUTSIDE WINDOW";
+        copy64(dst, pl + foff, fsize);
+        u64 done = (fsize + 7) & ~7UL;
+        if (vmsize > done)
+            zero64(dst + done, vmsize - done);
+    }
+    u64 adt_pa = kend + off;
+    copy64(adt_pa, pl + adt_off, adt_size);
+    u64 ba = (adt_pa + adt_size + PAGE16K - 1) & ~(PAGE16K - 1);
+    u64 top = ba + PAGE16K;
+    zero64(ba, PAGE16K);
+    /* struct boot_args (Revision 2, Version 2) */
+    *(volatile unsigned short *)(ba + 0) = 2;
+    *(volatile unsigned short *)(ba + 2) = 2;
+    wr64(ba + 8, virt_base);
+    wr64(ba + 16, phys_base);
+    wr64(ba + 24, mem_size);
+    wr64(ba + 32, top);
+    wr64(ba + 40, LCD_FB);          /* Video.v_baseAddr */
+    wr64(ba + 48, 1);               /* v_display */
+    wr64(ba + 56, LCD_PITCH);       /* v_rowBytes */
+    wr64(ba + 64, FB_W);
+    wr64(ba + 72, FB_H);
+    wr64(ba + 80, 32);              /* v_depth */
+    /* machineType u32 at 88; deviceTreeP u64 at 96 (a VA); deviceTreeLength u32 at 104 */
+    wr64(ba + 96, adt_pa - off);
+    w32(ba + 104, (u32)adt_size);
+    for (u32 i = 0; i < BOOT_LINE; i += 4)  /* CommandLine at 108 */
+        w32(ba + 108 + i, r32(pl + 0x48 + i));
+    /* bootFlags u64 at 720 (0), memSizeActual u64 at 728 */
+    wr64(ba + 728, mem_size);
+
+    puts_("JUMP ", GREEN);
+    hex(entry_va + off, 9, WHITE);
+    puts_(" BA ", GREEN);
+    hex(ba, 9, WHITE);
+    puts_("\n", WHITE);
+
+    /* XNU has no watchdog driver this early: stop LK's (key 0x22000000,
+     * enable bit clear), as ruby's shim does. A hang then stays on screen. */
+    w32(WDT_BASE + WDT_MODE, 0x22000000U | (r32(WDT_BASE + WDT_MODE) & 0x7eU));
+    __asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
+    register u64 x0 __asm__("x0") = ba;
+    register u64 x1 __asm__("x1") = entry_va + off;
+    __asm__ volatile("br x1" ::"r"(x0), "r"(x1));
+    return "XNU RETURNED";
+}
+
 /* ---- return to Fastboot ---- */
 
 static void psci_system_reset(void)
@@ -547,6 +664,8 @@ static void reboot_bootloader(void)
 
 static struct handoff h;
 
+extern char _end[];
+
 void probe_main(u64 dtb, u64 pc)
 {
     kick();
@@ -567,6 +686,20 @@ void probe_main(u64 dtb, u64 pc)
             info_screen(&h, pc, i);
             kick();
         }
+        fb_base = cands[0].addr;  /* the visible layer (OVL0 L1 on the G54) */
+        pitch = cands[0].pitch;
+    }
+
+    u64 pl = find_payload((u64)_end);
+    if (pl) {
+        puts_("\nSWEETXNU PAYLOAD AT ", GREEN);
+        hex(pl, 9, WHITE);
+        puts_("\n", WHITE);
+        wait_s(LOADER_S);
+        const char *why = load_xnu(pl);
+        puts_("LOADER FAILED: ", 0xffff0000U);
+        puts_(why, WHITE);
+        puts_("\n", WHITE);
     }
     wait_s(INFO_S);
     if (h.have_fb)

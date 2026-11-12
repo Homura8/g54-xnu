@@ -63,6 +63,18 @@ class PackTest(unittest.TestCase):
         with self.assertRaises(gp.PackError):
             gp.pack(b"NOTABOOT" + self.stock[8:], self.payload)
 
+    def test_append_places_blob_and_keeps_stream_size(self):
+        blob = b"SWEETXNU" + bytes(range(256)) * 64
+        img, info = gp.pack(self.stock, self.payload, append=blob, append_at=0x3000)
+        self.assertEqual(len(img), len(self.stock))
+        self.assertEqual(gp.verify(self.stock, img, self.payload), [])
+        raw = gp.gunzip(img[gp.PAGE:gp.PAGE + info["kernel_size"]])
+        self.assertEqual(raw[0x3000:0x3000 + len(blob)], blob)
+        with self.assertRaises(gp.PackError):
+            gp.pack(self.stock, self.payload, append=blob, append_at=0x3001)
+        with self.assertRaises(gp.PackError):
+            gp.pack(self.stock, self.payload, append=blob, append_at=0x1000)
+
     def test_fixed_size_gzip_is_exact_and_valid(self):
         raw = fake_raw_kernel(0x200000, seed=7)
         target = len(gzip.compress(raw, 9)) + 1000

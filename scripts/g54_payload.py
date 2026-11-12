@@ -24,6 +24,12 @@ import subprocess
 import sys
 import zlib
 
+
+def os_random(n):
+    import random
+    r = random.Random(0x654)  # deterministic filler: reproducible images
+    return r.randbytes(n)
+
 PAGE = 4096                      # fixed for boot header v3/v4
 PAYLOAD_OFF = 0x1000
 BRANCH = 0x14000000 | (PAYLOAD_OFF // 4)   # b #0x1000
@@ -53,7 +59,7 @@ def gunzip(stream):
     return zlib.decompress(stream, 16 + zlib.MAX_WBITS)
 
 
-def fixed_size_gzip(raw, size):
+def fixed_size_gzip(raw, size, protect=None):
     """gzip `raw` into exactly `size` bytes using FEXTRA padding.
 
     If plain deflate is too large, zero the raw kernel from the end
@@ -69,8 +75,16 @@ def fixed_size_gzip(raw, size):
         if 0 <= extra <= 0xFFFF:
             break
         if extra > 0xFFFF:
-            raise PackError(f"deflate too small to pad ({len(deflate)} for {size})")
-        if tail - step <= PAYLOAD_OFF + 0x100000:
+            # Too compressible (e.g. zeroed tail after an XNU payload): fill
+            # the unused tail with incompressible bytes until it fits.
+            if protect is None or len(raw) - protect < 0x10000:
+                raise PackError(f"deflate too small to pad ({len(deflate)} for {size})")
+            need = extra - 0x8000
+            fill_from = protect + ((len(raw) - protect - need) // 0x1000) * 0x1000 if need < len(raw) - protect else protect
+            fill_from = max(protect, len(raw) - need - 0x1000)
+            raw[fill_from:] = os_random(len(raw) - fill_from)
+            continue
+        if tail - step <= max(PAYLOAD_OFF + 0x100000, protect or 0):
             raise PackError("cannot shrink kernel stream to the stock size")
         tail -= step
         raw[tail:] = bytes(len(raw) - tail)
@@ -81,7 +95,8 @@ def fixed_size_gzip(raw, size):
     return gz, bytes(raw), len(raw) - tail
 
 
-def pack(stock, payload):
+def pack(stock, payload, append=None, append_at=None):
+    """Probe at raw+0x1000; optional `append` blob (an XNU payload) at raw+append_at."""
     info = parse_v4(stock)
     ks = info["kernel_size"]
     raw = bytearray(gunzip(stock[PAGE:PAGE + ks]))
@@ -91,7 +106,18 @@ def pack(stock, payload):
         raise PackError("payload too large")
     raw[0:4] = struct.pack("<I", BRANCH)
     raw[PAYLOAD_OFF:PAYLOAD_OFF + len(payload)] = payload
-    gz, final_raw, zeroed = fixed_size_gzip(raw, ks)
+    protect = PAYLOAD_OFF + len(payload)
+    if append is not None:
+        if append_at is None or append_at < PAYLOAD_OFF + len(payload) or append_at % 0x1000:
+            raise PackError("append_at must be 4 KiB aligned and after the probe")
+        if append_at + len(append) > len(raw):
+            raise PackError(f"appended blob ({len(append)} bytes) exceeds the raw kernel ({len(raw)})")
+        raw[append_at:append_at + len(append)] = append
+        # Nothing after the payload is used: zero it so the stream compresses.
+        end = append_at + len(append)
+        raw[end:] = bytes(len(raw) - end)
+        protect = end
+    gz, final_raw, zeroed = fixed_size_gzip(raw, ks, protect)
     out = bytearray(stock)
     out[PAGE:PAGE + ks] = gz
     return bytes(out), {"kernel_size": ks, "raw": len(final_raw), "zeroed_tail": zeroed}
