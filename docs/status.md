@@ -4,7 +4,7 @@
 
 | Milestone | Needs the phone | State |
 | --- | --- | --- |
-| **M2** toolchain: reproducible kernel pipeline (line K0) | no | pipeline written; first CI result pending — see below |
+| **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
 | **M1** device facts and safety baseline | read-only first | not started; template in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, with explicit approval | not started; depends on M1 + M2 |
 
@@ -24,6 +24,20 @@ direct kernels.
 
 ## Next concrete steps
 
-1. Get the K0 CI run green (exec-data `6b22fc25…` with an empty `KDKROOT`).
-2. M1 read-only facts (owner, with the phone): fill device-facts.md.
-3. Boot-image format work once the header version and DTB location are known.
+1. M1 read-only facts (owner, with the phone): fill device-facts.md. This is
+   now the critical path; nothing device-specific can be written before it.
+2. Boot-image format work once the header version and DTB location are known
+   (ruby's `tools/image` covers header v2 only).
+3. First G54 patch: the early framebuffer address/stride from M1, with the
+   exec-data gate switched to record-only.
+
+## K0 evidence (2026-11-12)
+
+| Item | Result |
+| --- | --- |
+| Runner | `macos-15` image `20261104.0514.1`, macOS 15.8.2 (24H232) |
+| Xcode | 16.0, build 16A242d (checked by the workflow) |
+| KDK | none preinstalled; `KDKROOT` = empty directory, still empty after the build; no download |
+| Patchsets | ruby `a9cc0050…` and G54 `a9cc0050…` (187 files) |
+| Kernel | exec-data `6b22fc25…` = ruby CI 42301546006; `__TEXT`, `__CTF`, `__LINKEDIT` differ (build paths), all code and data segments identical |
+| Time | 10 min with a cold ccache |

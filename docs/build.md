@@ -27,8 +27,9 @@ third-party mirror. XNU 8796 links a KDK library only for the `T6000`,
 `T8101` and `VMAPPLE` machine configs (`makedefs/MakeInc.def`); the sweet
 patches build the open-source arm64 assembly and pmap for `SWEET` instead
 (patch 0006). The workflow therefore points `KDKROOT` at an empty
-directory and fails if anything is written into it. If the exec-data gate
-passes, the KDK demonstrably contributes nothing to the kernel.
+directory and fails if anything is written into it. **Verified in CI run
+43207707172:** no KDK on the runner, the directory stayed empty, and the
+exec-data gate passed, so the KDK contributes nothing to this kernel.
 
 ## After K0
 
