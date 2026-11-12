@@ -140,6 +140,45 @@ Discover connected phone + actual firmware + consent
   *verified* restore image. A/B slots are **not automatically safe backups**:
   OTA may have changed the inactive slot.
 
+## 3a. The proven G54 loop (2026-11-12 UTC, firmware 5-8-6, slot A)
+
+Established by [E0](experiments/2026-11-12-e0-fastboot-boot.md),
+[E1](experiments/2026-11-12-e1-g1-probe.md) and
+[E2](experiments/2026-11-12-e2-psci-reset.md). Reuse it rather than
+rediscovering it:
+
+1. **No RAM boot.** `fastboot boot` replies `OKAY` and does nothing. Every
+   test is `fastboot flash boot_a <image>` then `fastboot reboot`.
+2. **Image format.** Keep the stock 5-8-6 `boot.img` byte for byte except
+   the gzip kernel stream: same `kernel_size`, FEXTRA padding, arm64 Image
+   header kept, `raw[0]` branches to code at `raw+0x1000`. Build with
+   `scripts/g54_payload.py pack` (it self-verifies). LK accepts the stale
+   AVB hash with the orange-state warning. A boot cycle shows Hello Moto
+   (about 5 s), the unlocked warning (about 5 s), then our code.
+3. **Entry.** LK jumps with the MMU off and x0 = DTB. The visible LK
+   framebuffer is read from `/chosen atag,videolfb-fb_base_h/_l` and
+   `atag,videolfb-vramSize` in that DTB. Filling the whole vram range is
+   visible on the panel.
+4. **Automatic return to Fastboot.** Write `3` into the watchdog reboot-mode
+   register (`0x1c007000 + 0x24`, mask `0xf`), then PSCI `SYSTEM_RESET`
+   (`smc` with `x0 = 0x84000009`). LK then reports `reason: preloader set
+   fastboot mode`. A direct watchdog `SWRST` resets but boots normally, so
+   the image loops (E1). Every payload, including future shims and XNU panic
+   paths, should end with this sequence so the host can poll `fastboot
+   devices` without anyone touching the phone.
+5. **Manual escape.** If an image loops or hangs, hold Power + Volume Down.
+   LK then reports `reason: Volume down key pressed`.
+6. **Observation.** USB timing and `getvar reason` are automatic. For values
+   only the payload can see, paint a coded screen (white/black bands, green
+   separators, rows computed modulo a 1088×2400 screen) and ask the owner
+   to read or photograph it.
+7. **Restore.** Flash the package `boot.img` (SHA-256 `e0fe4010…`) to
+   `boot_a`, then check Android's fingerprint and `ro.boot.vbmeta.digest`
+   (`e6a5d57f…`).
+8. **Before the first write after any OTA**, wait for
+   `snapshot-update-status: none`; the Virtual A/B merge starts 300 s after
+   boot.
+
 ## 4. Keep small evidence, not giant logs or rebuilds
 
 For every test record a private run card with date UTC, repo commit, toolchain

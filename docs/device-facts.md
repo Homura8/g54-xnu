@@ -23,6 +23,10 @@ verified Motorola package. Supersedes the 5-8-3 table below where they differ.
 | Fastboot reason after `adb reboot bootloader` | `preloader set fastboot mode` | `getvar all` |
 | `fastboot boot` | **not implemented**: replies `(bootloader) command is not implemented!` then `OKAY`, and nothing boots | [E0](experiments/2026-11-12-e0-fastboot-boot.md) |
 | PSCI | 1.0, method `smc` | package DTB |
+| LK boot of a modified `boot_a` | accepted: stock v4 layout with a replaced gzip kernel stream, stale AVB hash, orange warning; jumps to the arm64 Image with x0 = DTB | [E1](experiments/2026-11-12-e1-g1-probe.md) |
+| LK framebuffer visibility | filling `atag,videolfb-fb_base`…`+vramSize` is visible on the panel | E1 |
+| Return to Fastboot from our code | reboot-mode 3 + PSCI `SYSTEM_RESET` → `reason: preloader set fastboot mode`; reboot-mode 3 + watchdog `SWRST` → normal boot | [E2](experiments/2026-11-12-e2-psci-reset.md), E1 |
+| Manual Fastboot | Power + Volume Down → `reason: Volume down key pressed` | E1 |
 
 **Matching restore images:** the package
 `CANCUNF_G_SYS_V1TDS35H.83_20_5_8_6_subsidy_DEFAULT_regulatory_DEFAULT_cid50_CFC.xml.zip`

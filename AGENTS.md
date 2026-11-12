@@ -23,6 +23,16 @@
   then run one bounded, observable, reversible experiment. The owner has
   indicated willingness to reset and experiment on this spare G54, **not**
   permission to bypass recovery checks.
+- **Standing owner authorization (given 2026-11-12 UTC, in chat):** the G54
+  is a dedicated test phone with no data the owner needs. Agents may reboot
+  it and flash it **as long as the change can be reverted**. In practice
+  that means writing `boot_a` (and other boot images that have a verified
+  stock copy) and rebooting between Android, Fastboot and test images.
+  Restoring stock `boot.img` between tests is **not** required; restore at
+  the end of a session or when Android is needed. This authorization does
+  not cover the critical partitions below. The Claude Code auto-mode
+  classifier may still block `fastboot flash`. If it does, ask the owner and
+  quote this line; never work around it.
 - No unattended writes to preloader, LK, bootloader/TEE, GPT, calibration,
   NVRAM/NVDATA/persist/efuse, rollback/security configuration or relock.
   These require fresh, specific owner approval and a separate recovery plan.

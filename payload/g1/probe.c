@@ -44,10 +44,13 @@ typedef unsigned long u64;
 #define GREEN           0xff00ff00U
 
 #ifndef PHASE1_S
-#define PHASE1_S 10
+#define PHASE1_S 4
+#endif
+#ifndef DIAG_S
+#define DIAG_S 25
 #endif
 #ifndef PHASE2_S
-#define PHASE2_S 5
+#define PHASE2_S 3
 #endif
 
 #define FDT_MAGIC       0xd00dfeedU
@@ -204,20 +207,66 @@ static void fill(const struct fb *fb, u32 color)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+/*
+ * E1 (2026-11-12) showed the probe runs and the reset happens, but a direct
+ * WDT_SWRST boots normally instead of entering Fastboot. Android's
+ * `reboot bootloader` (which works) ends in PSCI SYSTEM_RESET, because Linux's
+ * PSCI restart handler outranks mtk-wdt. E2 changes only that: PSCI first,
+ * WDT_SWRST as fallback.
+ */
+static void psci_system_reset(void)
+{
+    register u64 x0 __asm__("x0") = 0x84000009UL;
+    __asm__ volatile("smc #0" : "+r"(x0)::"x1", "x2", "x3", "memory");
+}
+
 static void reboot_bootloader(void)
 {
     u32 m = r32(WDT_BASE + WDT_NONRST2);
     w32(WDT_BASE + WDT_NONRST2, (m & ~RB_MODE_MASK) | RB_MODE_BOOTLOADER);
     __asm__ volatile("dsb sy" ::: "memory");
+    psci_system_reset();
     for (int i = 0; i < 20; i++) {
         w32(WDT_BASE + WDT_SWRST, WDT_SWRST_KEY);
         u64 end = ticks() + freq() / 20;
         while (ticks() < end)
             ;
     }
-    /* Watchdog did not reset us: PSCI SYSTEM_RESET via SMC. */
-    register u64 x0 __asm__("x0") = 0x84000009UL;
-    __asm__ volatile("smc #0" : "+r"(x0)::"x1", "x2", "x3", "memory");
+}
+
+/*
+ * Diagnostic screen: four horizontal quarters, white = yes, black = no,
+ * separated by green lines. Rows are computed modulo one 1088x2400x32bpp
+ * screen (LK pitch on MediaTek = width aligned to 32 px; ruby observed 4352
+ * bytes for 1080), so every screen-sized buffer in the region shows it.
+ */
+#define PITCH   (1088UL * 4UL)
+#define ROWS    2400UL
+#define SCREEN  (PITCH * ROWS)
+#define WHITE   0xffffffffU
+#define BLACK   0xff000000U
+
+static void diag_screen(const struct fb *fb, const int yes[4])
+{
+    for (u64 base = fb->base; base + PITCH <= fb->base + fb->size; base += PITCH) {
+        u64 row = ((base - fb->base) % SCREEN) / PITCH;
+        u64 q = row / (ROWS / 4), in = row % (ROWS / 4);
+        u32 c = (in < 12 || in >= ROWS / 4 - 12) ? GREEN : (yes[q] ? WHITE : BLACK);
+        volatile u64 *p = (volatile u64 *)base;
+        u64 v = ((u64)c << 32) | c;
+        for (u64 i = 0; i < PITCH / 8; i++)
+            p[i] = v;
+        if ((row & 63) == 0)
+            kick();
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static u32 current_el(void)
+{
+    u64 v;
+    __asm__ volatile("mrs %0, CurrentEL" : "=r"(v));
+    return (u32)(v >> 2) & 3;
 }
 
 void probe_main(u64 dtb)
@@ -229,6 +278,24 @@ void probe_main(u64 dtb)
     if (have_fb)
         fill(&fb, MAGENTA);
     wait_s(PHASE1_S);
+
+    /* Observe, then set the reboot mode (same write as reboot_bootloader). */
+    u32 el = current_el();
+    u32 mode = r32(WDT_BASE + 0x00);
+    u32 before = r32(WDT_BASE + WDT_NONRST2);
+    w32(WDT_BASE + WDT_NONRST2, (before & ~RB_MODE_MASK) | RB_MODE_BOOTLOADER);
+    __asm__ volatile("dsb sy" ::: "memory");
+    u32 after = r32(WDT_BASE + WDT_NONRST2);
+    int yes[4] = {
+        el == 2,                                  /* Q1: entered at EL2 */
+        (mode & 1U) != 0,                         /* Q2: watchdog enabled by LK */
+        (after & RB_MODE_MASK) == RB_MODE_BOOTLOADER, /* Q3: reboot-mode write stuck */
+        before != 0xffffffffU && before != after, /* Q4: register readable and changed */
+    };
+    if (have_fb)
+        diag_screen(&fb, yes);
+    wait_s(DIAG_S);
+
     if (have_fb)
         fill(&fb, GREEN);
     wait_s(PHASE2_S);

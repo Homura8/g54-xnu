@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
-| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **E0 done** ([`fastboot boot` is a no-op](experiments/2026-11-12-e0-fastboot-boot.md)); G1 probe built, emulated, packed and verified; **E1 (flash probe to `boot_a`, restore stock) prepared, awaiting owner go-ahead** |
+| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **step 1 done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK accepts our `boot_a` image and the probe paints the panel; [E2](experiments/2026-11-12-e2-psci-reset.md) the probe returns the phone to Fastboot unattended. Next: the shim and XNU stage-0 band |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -49,15 +49,11 @@ direct kernels.
 
 ## Next concrete steps (12 November 2026 UTC, after the 5-8-6 OTA)
 
-1. **E1, G1 probe on hardware** (needs the owner's explicit go-ahead to write
-   `boot_a`). Preflight gates all passed at 15:56 UTC: build = package,
-   slot A, unlocked, `snapshot-update-status=none`, `boot_a` = 64 MiB = image
-   size, restore image hash checked. Procedure: `fastboot flash boot_a
-   out/g1/probe-boot.img`, `fastboot reboot`, then time Fastboot's return
-   (expect ~15 s plus two LK boots, `reason: preloader set fastboot mode`;
-   immediate return = LK rejection). Restore with `fastboot flash boot_a
-   <package boot.img>` and confirm Android plus `ro.boot.vbmeta.digest`. If
-   the phone cycles colours for over a minute, hold Power + Volume Down.
+1. **Use the automatic loop** in [hardware-loop.md §3a](hardware-loop.md):
+   flash `boot_a`, `fastboot reboot`, poll for Fastboot. The owner allows
+   revertible flashing without restoring between tests (AGENTS.md). The
+   phone currently holds the E2 probe in `boot_a`. Restore stock before
+   handing the phone back for Android use.
 2. **G2, XNU stage-0 band on the G54.** Reuse the pinned ios-topaz `shim/`,
    `tools/mkadt.py` and `tools/mkpayload.py` (ruby's lineage; source at
    `BASE_SHA`). G54 deltas: MT6855 GIC/timer/CPU map in the ADT (the A55
