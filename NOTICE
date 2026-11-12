@@ -1,0 +1,19 @@
+g54-xnu original code and documentation: MIT; see LICENSE.
+
+Fetched at pinned commits during builds, never vendored:
+- lky005/ruby-ios-bringup: MIT for its code and documentation; its XNU patches
+  are APSL-2.0. Its ci/ scripts are run unmodified from the pinned commit.
+- MakrSas/ios-topaz: XNU patch baseline (sweet 0001-0079 lineage, from
+  lgrachov/ios-qemu and its predecessors). The repository declares no licence;
+  its patches modify Apple XNU (APSL-2.0) and ios-qemu's tools are MIT.
+- blacktop/darwin-xnu-build: MIT.
+- Apple XNU and other Apple open source: APSL-2.0 and per-file licences.
+
+CI artifacts contain only a kernel built from those open sources with Apple's
+toolchain; no SDK headers, KDK, firmware or iOS material is published.
+The iOS userland and any Apple software come from the user's own copies under
+Apple's licence and are never distributed by this project.
+
+Apple, iOS and iPhone are trademarks of Apple Inc. Motorola and Moto are
+trademarks of their owners. Independent research project; not affiliated with
+or endorsed by Apple, Motorola, MediaTek or the upstream authors.

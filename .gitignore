@@ -1,0 +1,13 @@
+# Never commit Apple material, phone images or dumps.
+*.img
+*.bin
+*.ipsw
+*.dmg
+*.kdk
+*.dtb
+*.dtbo
+out/
+dumps/
+.cache/
+__pycache__/
+.DS_Store
