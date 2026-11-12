@@ -5,14 +5,14 @@
 | Milestone | Needs the phone | State |
 | --- | --- | --- |
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
-| **M1** device facts and safety baseline | read-only first | **ADB and Fastboot collected 2026-11-12 UTC** on unlocked XT2343-2; firmware/DTB/recovery analysis still pending ([observed facts](device-facts.md)) |
-| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **not started**; recovery/boot-entry route unverified; follow [hardware loop](hardware-loop.md) |
+| **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
+| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **E0 done** ([`fastboot boot` is a no-op](experiments/2026-11-12-e0-fastboot-boot.md)); G1 probe built, emulated, packed and verified; **E1 (flash probe to `boot_a`, restore stock) prepared, awaiting owner go-ahead** |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
-appears; (3) kernel log on screen. An in-RAM test is preferred **only if this G54 supports `fastboot boot`**.
-G54 community reports raise doubt. Determine an approved recoverable execution
-path before writing anything, and link each observed milestone to an image hash.
+appears; (3) kernel log on screen. RAM boot is **not** available (E0), so each
+step flashes `boot_a` and restores the verified stock 5-8-6 `boot.img`
+(SHA-256 `e0fe4010…`) afterwards. Link each observed milestone to an image hash.
 
 ## Why this route (decided 2026-11-12)
 
@@ -47,25 +47,36 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## Next concrete steps (13 November 2026)
+## Next concrete steps (12 November 2026 UTC, after the 5-8-6 OTA)
 
-1. **Use the connected phone**, if present, under [the agent-led hardware
-   loop](hardware-loop.md). The owner has explicitly unlocked the bootloader;
-   verified M1 Android+Fastboot data are recorded in [device-facts.md](device-facts.md).
-   The phone was later reported OTA-updating from `...5-8-3` to `...5-8-4`;
-   **re-read actual firmware/slot after OTA** rather than assuming completion.
-2. Extract and verify the locally copied Motorola Software Fix
-   `V1TDS35H.83-20-5-8-6` firmware *offline*. It is **not** a matching backup
-   until current firmware, component compatibility, rollback and a working
-   restore path have been verified. Read the real v4-style boot/vendor_boot
-   headers, DTBs and LK behaviour; never copy ruby's v2 format or addresses.
-3. Prepare the smallest observable execution payload with a recoverable and
-   authorised G54-specific boot route. Distinguish accepted image, entered
-   payload, early XNU and iOS userspace; advance on evidence. The **goal**
-   is iOS 16.7.16 SpringBoard, not merely a coloured pixel.
-4. When implementing a real G54 XNU patch, update patchset pins and record-only
-   exec-data gate per [build.md](build.md), then run focused CI. Reuse unchanged
-   K0 artifacts in the meantime.
+1. **E1, G1 probe on hardware** (needs the owner's explicit go-ahead to write
+   `boot_a`). Preflight gates all passed at 15:56 UTC: build = package,
+   slot A, unlocked, `snapshot-update-status=none`, `boot_a` = 64 MiB = image
+   size, restore image hash checked. Procedure: `fastboot flash boot_a
+   out/g1/probe-boot.img`, `fastboot reboot`, then time Fastboot's return
+   (expect ~15 s plus two LK boots, `reason: preloader set fastboot mode`;
+   immediate return = LK rejection). Restore with `fastboot flash boot_a
+   <package boot.img>` and confirm Android plus `ro.boot.vbmeta.digest`. If
+   the phone cycles colours for over a minute, hold Power + Volume Down.
+2. **G2, XNU stage-0 band on the G54.** Reuse the pinned ios-topaz `shim/`,
+   `tools/mkadt.py` and `tools/mkpayload.py` (ruby's lineage; source at
+   `BASE_SHA`). G54 deltas: MT6855 GIC/timer/CPU map in the ADT (the A55
+   cores `cpu@000`–`cpu@005`, as ruby uses only A55), LK framebuffer from
+   `/chosen atag,videolfb-*`, watchdog `0x1c007000`. Pack shim+payload with
+   `scripts/g54_payload.py`; the stock gzip stream is 19,694,685 bytes (raw
+   46,925,524). Reuse the K0 kernel; no XNU rebuild is needed for G2.
+3. Then storage (UFS LUN/partition for the iOS root), then launchd, then
+   SpringBoard, following ruby's ladder; change one subsystem per image.
+
+### Safety notes learned this session
+
+- `fastboot boot` answers `OKAY` without booting. Never read that as success.
+- LK's `set_active` warns that the target slot's bootloader images may be
+  invalid (brick risk), and slot B still holds 5-8-4. Do not switch slots.
+- Never run the package's `flashfile.xml` wholesale: it flashes preloader, LK,
+  TEE, GPT and efuseBackup, and erases `nvdata`.
+- Wait for the post-OTA Virtual A/B merge (`snapshot-update-status=none`, no
+  `*-cow` mapper devices; merge starts 300 s after boot) before any write.
 
 ## Observed G54 hardware checkpoint (2026-11-12 UTC)
 

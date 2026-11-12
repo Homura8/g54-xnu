@@ -1,6 +1,40 @@
 # G54 device facts (milestone M1)
 
-## Observed on the owner's XT2343-2 (12 November 2026 UTC)
+## Current: after OTA to 5-8-6 (12 November 2026, ~15:45–15:55 UTC)
+
+Sources: private `facts/20261112T154824Z-adb`, `facts/20261112T154843Z-fastboot`,
+direct read-only `getprop`/`/proc`/sysfs listings, and offline analysis of the
+verified Motorola package. Supersedes the 5-8-3 table below where they differ.
+
+| Field | Observed value | Source |
+| --- | --- | --- |
+| OTA path | 5-8-3 (slot A) → 5-8-4 (slot B) → **5-8-6 (slot A)**, all OTAs on 2026-11-12 | `getprop` after each reboot |
+| Build | `motorola/cancunf_g_sysn/cancunf:15/V1TDS35H.83-20-5-8-6/f6c76f-a73c57`; vendor `cancunf_g_vext/…/f6c76f`; security patch 2026-09-01 | `getprop` |
+| Bootloader | `MBM-3.1-cancunf_g_vext-f9d83-V1TDS35H.83-20-5-8-6-f6c76f` | `getprop`, `getvar` |
+| Kernel | `5.10.240-android12-9-00006-g25161a557b20-ab14744618`, built 20 Jan 2026; **the same GKI build on 5-8-3, 5-8-4 and 5-8-6** | `/proc/version`, `getvar`, package `boot.img` |
+| Slots | current `a`; `slot-successful` a/b `yes`; `slot-retry-count` a/b `1`; unbootable a/b `no` | `getvar all` |
+| Virtual A/B | enabled, userspace snapshots, compression; `merge_delay_seconds=300`; right after the OTA `snapshot-update-status: snapshotted` | `getprop`, `getvar` |
+| AVB | `ro.boot.vbmeta.digest` = digest recomputed from the package's `vbmeta.img` + `vbmeta_system.img` (chain order vbmeta → vbmeta_system); that vbmeta holds the `boot`, `dtbo`, `vendor_boot` hash descriptors, and all three match the package images | `getprop` + host AVB parse |
+| Panel | 1080×2400, 400 dpi | `wm size`, `wm density` |
+| Storage | UFS (`/dev/block/sdc*`; `boot_b` → `sdc65`) | `ls -l /dev/block/by-name` |
+| RAM | 8 GB (`MemTotal` 7,786,768 kB) | `/proc/meminfo`, `getvar ram` |
+| LK framebuffer | runtime `/chosen` has `atag,videolfb`, `atag,videolfb-fb_base_h/_l`, `atag,videolfb-vramSize`; reserved node `mblock-15-framebuffer`. Values are not readable as shell (SELinux) | `/proc/device-tree` listing |
+| Watchdog / reboot-mode | `watchdog@1c007000` (`mediatek,mt6855-wdt`); `reboot-mode` offset `0x24`, mask `0xf`, bootloader = `3`; bound to Linux `syscon-reboot-mode` and `mtk-wdt` | package DTB + `/sys/bus/platform/drivers` |
+| Fastboot reason after `adb reboot bootloader` | `preloader set fastboot mode` | `getvar all` |
+| `fastboot boot` | **not implemented**: replies `(bootloader) command is not implemented!` then `OKAY`, and nothing boots | [E0](experiments/2026-11-12-e0-fastboot-boot.md) |
+| PSCI | 1.0, method `smc` | package DTB |
+
+**Matching restore images:** the package
+`CANCUNF_G_SYS_V1TDS35H.83_20_5_8_6_subsidy_DEFAULT_regulatory_DEFAULT_cid50_CFC.xml.zip`
+(zip SHA-256 `a8fab65dbf6b44ed…d1f78477`, all 43 `flashfile.xml` MD5s match)
+is the installed build. Its `boot.img` (SHA-256 `e0fe4010…37cc2d4`) is the
+image the phone's own vbmeta expects for `boot_a`. Caveats: its
+`flashfile.xml` targets `_a` only, flashes preloader/LK/TEE/GPT/efuseBackup
+and *erases* `nvdata`, so it must never be run wholesale. Use individual,
+named images only. Its product label is `cancunf_g_sys`, the phone's is
+`cancunf_g_sysn`; the build hashes match exactly.
+
+## Observed on the owner's XT2343-2 before the OTAs (12 November 2026 UTC)
 
 These are **historical observations**, not assertions about the phone
 following its later OTA. Sources: private
