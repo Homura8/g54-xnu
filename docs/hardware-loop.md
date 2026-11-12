@@ -179,6 +179,53 @@ rediscovering it:
    `snapshot-update-status: none`; the Virtual A/B merge starts 300 s after
    boot.
 
+
+## 3b. Rebuilding inputs and iterating on XNU (2026-11-12, proven E5–E14)
+
+Nothing from a previous session's scratch space is needed. Everything below
+goes in Git-ignored `out/`.
+
+```sh
+# Stock 5-8-6 boot.img (the base for every image and the restore image)
+mkdir -p out/fw && unzip -j ~/Downloads/CANCUNF_G_SYS_V1TDS35H.83_20_5_8_6_*.xml.zip '*/boot.img' -d out/fw
+shasum -a 256 out/fw/boot.img        # must be e0fe4010a8a897e0…37cc2d4
+# ios-topaz tools at the pinned BASE_SHA (config/kernel.env)
+git init -q out/topaz && git -C out/topaz fetch -q --depth 1 https://github.com/MakrSas/ios-topaz.git <BASE_SHA> && git -C out/topaz checkout -q FETCH_HEAD
+# Kernel: latest successful kernel.yml run on the branch/main ("G54 patches applied" passed)
+gh run download <run-id> -n g54-xnu-kernel -D out/k
+# iPhone X /product identity (Apple material, never commit): see docs/status.md
+```
+
+Build and flash one experiment:
+
+```sh
+python3 scripts/g54_payload.py build --out out/g1-ufs -D UFS_FIX -D LOADER_S=25
+python3 scripts/g54_xnu_image.py --topaz out/topaz --kernel out/k/kernel.development.sweet \
+    --stock out/fw/boot.img --probe out/g1-ufs --ufs --cmdline "<boot-args>" --out out/x/boot.img
+fastboot flash boot_a out/x/boot.img && fastboot reboot
+```
+
+- `-D UFS_FIX` is required for storage: LK 5-8-6 leaves the UFS device in
+  reset, and the probe replays MediaTek's vendor order (E13) plus `fDeviceInit` (E14).
+- Always pass `g54panicreset=45` (patch 0201): after a panic the phone
+  returns to Fastboot by itself. Poll `fastboot devices`; `getvar reason`
+  = `preloader set fastboot mode` means an automatic return. A hang without
+  a panic (e.g. root-mount retries) still needs Power + Volume Down.
+- **Observation:** there is no log channel yet. The owner photographs the
+  probe info screen (shown for `LOADER_S` seconds) and XNU's final console;
+  the console wraps to the top, so the newest line is the one just above
+  the blank line. New diagnostics go on the probe screen (`kv()`/`puts_()` in
+  `payload/g1/probe.c`), behind a `-D` flag.
+- **Method that worked:** one hypothesis per image; emulate first (QEMU
+  `virt`, `-cpu cortex-a55 -m 8G`, EL1 entry, a DTB with the `/chosen atag,videolfb-*`
+  properties, framebuffer dumped with `pmemsave`); read LK/vendor code
+  before guessing (LK disassembly found the UFS reset); record a run card
+  in `docs/experiments/`; commit; push.
+- Kernel changes: `patches/02NN-g54-*.patch` on the fully patched tree
+  (reproduce it locally: ruby `ci/prepare-baseline.sh`, Apple
+  `xnu-8796.141.3`, apply the series in glob order like `darwin-xnu-build`),
+  update `G54_PATCHSET_SHA256`, push, wait for `kernel.yml` (~10 min).
+
 ## 4. Keep small evidence, not giant logs or rebuilds
 
 For every test record a private run card with date UTC, repo commit, toolchain

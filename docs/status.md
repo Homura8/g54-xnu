@@ -50,8 +50,17 @@ direct kernels.
 
 ## Next concrete steps (12 November 2026 UTC, after E14)
 
+**Phone state at handover:** unlocked, 5-8-6, slot A, `boot_a` = the E14 XNU
+image (Android won't boot until the stock `boot.img` is flashed back);
+`userdata` still holds Android data. Latest kernel: K2 = 0200+0201, CI run
+43265320296. Rebuild every input with `docs/hardware-loop.md` §3b. The decoded
+D22AP tree is made by extracting `Firmware/all_flash/DeviceTree.d22ap.im4p`
+from the IPSW and LZFSE-decoding its IM4P payload (macOS `libcompression`,
+algorithm 0x801) into `out/ipsw/d22ap.adt`.
+
 1. **Build the iOS root** on the Mac (needs sudo; ~20 GB free):
-   `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw <ios-topaz at BASE_SHA> out/root/ios16-root.img 16g`
+   `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
+   (ask the owner to run it: it needs their sudo password)
    (macOS port of topaz `mkiosroot.sh`; untested yet). The decoded D22AP
    tree for `/product` is `out/ipsw/d22ap.adt` (pass `--d22ap`).
 2. **Flash it:** `fastboot flash userdata out/root/ios16-root.img`. This erases

@@ -1,5 +1,11 @@
 # Working on g54-xnu
 
+**Resuming ("pick up the iOS port, the G54 is on USB"):** read
+`docs/status.md` (where things stand and the next step), then
+`docs/hardware-loop.md` §3a–3b (the proven loop and how to rebuild every
+input from scratch). Check `adb devices`/`fastboot devices`, then continue
+with the next step in status.md, one experiment at a time.
+
 - Read `docs/status.md` first; it is the handoff. For physical-device work,
   immediately read [`docs/hardware-loop.md`](docs/hardware-loop.md).
   Update status in the same PR as any change in what works.
