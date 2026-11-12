@@ -5,13 +5,14 @@
 | Milestone | Needs the phone | State |
 | --- | --- | --- |
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
-| **M1** device facts and safety baseline | read-only first | not started; template in [device-facts.md](device-facts.md) |
-| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, with explicit approval | not started; depends on M1 + M2 |
+| **M1** device facts and safety baseline | read-only first | **ADB and Fastboot collected 2026-11-12 UTC** on unlocked XT2343-2; firmware/DTB/recovery analysis still pending ([observed facts](device-facts.md)) |
+| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **not started**; recovery/boot-entry route unverified; follow [hardware loop](hardware-loop.md) |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
-appears; (3) kernel log on screen. Each step is RAM-booted if the G54 permits
-`fastboot boot`, photographed, and tied to the image hash.
+appears; (3) kernel log on screen. An in-RAM test is preferred **only if this G54 supports `fastboot boot`**.
+G54 community reports raise doubt. Determine an approved recoverable execution
+path before writing anything, and link each observed milestone to an image hash.
 
 ## Why this route (decided 2026-11-12)
 
@@ -22,16 +23,44 @@ iPadOS 17 route would first need a G54 UEFI port; no MediaTek UniXNU port has
 reached a home screen. UniXNU stays the fallback if the G54's LK refuses
 direct kernels.
 
-## Next concrete steps
+## Next concrete steps (13 November 2026)
 
-1. M1 read-only facts (owner, with the phone): run `scripts/m1_facts.py adb`,
-   then `fastboot`, and the offline `bootimg` analysis on the matching stock
-   images; fill device-facts.md. This is now the critical path; nothing
-   device-specific can be written before it.
-2. Boot-image format work once the header version and DTB location are known
-   (ruby's `tools/image` covers header v2 only).
-3. First G54 patch: the early framebuffer address/stride from M1, with the
-   exec-data gate switched to record-only.
+1. **Use the connected phone**, if present, under [the agent-led hardware
+   loop](hardware-loop.md). The owner has explicitly unlocked the bootloader;
+   verified M1 Android+Fastboot data are recorded in [device-facts.md](device-facts.md).
+   The phone was later reported OTA-updating from `...5-8-3` to `...5-8-4`;
+   **re-read actual firmware/slot after OTA** rather than assuming completion.
+2. Extract and verify the locally copied Motorola Software Fix
+   `V1TDS35H.83-20-5-8-6` firmware *offline*. It is **not** a matching backup
+   until current firmware, component compatibility, rollback and a working
+   restore path have been verified. Read the real v4-style boot/vendor_boot
+   headers, DTBs and LK behaviour; never copy ruby's v2 format or addresses.
+3. Prepare the smallest observable execution payload with a recoverable and
+   authorised G54-specific boot route. Distinguish accepted image, entered
+   payload, early XNU and iOS userspace; advance on evidence. The **goal**
+   is iOS 16.7.16 SpringBoard, not merely a coloured pixel.
+4. When implementing a real G54 XNU patch, update patchset pins and record-only
+   exec-data gate per [build.md](build.md), then run focused CI. Reuse unchanged
+   K0 artifacts in the meantime.
+
+## Observed G54 hardware checkpoint (2026-11-12 UTC)
+
+- ADB `facts/20261112T143123Z-adb`: XT2343-2 (later read-only
+  `ro.boot.hardware.sku`), `cancunf`, MT6855V/AZA, Cortex-A55/A78,
+  Android 15, first API 33, `retapac`, software
+  `V1TDS35H.83-20-5-8-3`, slot `_a`, AVB `orange`, lock flag `0`.
+  `vendor_boot`, `dtbo`, `lk` present; no `init_boot` observed;
+  `/sys/class/graphics/fb0` absent.
+- Fastboot `facts/20261112T143344Z-fastboot`: `product=cancunf`,
+  `securestate=flashing_unlocked`, `is-userspace=no`,
+  `current-slot=a`, `slot-count=2`,
+  `max-download-size=268435456`. These data do **not** establish
+  partition sizes or `fastboot boot` support.
+- Bootloader property: `MBM-3.1-cancunf_g_vext-31a87-V1TDS35H.83-20-5-8-3-6e233`.
+  The downloaded `...5-8-6` package is a distinct version; no firmware
+  images have yet been verified in this repository.
+- Do not publish raw `facts/` reports or the device serial. No custom
+  G54 payload or XNU execution has been observed.
 
 ## K0 evidence (2026-11-12)
 
