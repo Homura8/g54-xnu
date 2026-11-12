@@ -13,6 +13,6 @@
 | Expected positive observation | Fastboot returns on its own with `reason: preloader set fastboot mode`; magenta 4 s, a 4-band diagnostic screen for 25 s, green 3 s |
 | Actual observation | Fastboot back **57 s** after `fastboot reboot`, no key press, `reason: preloader set fastboot mode` |
 | Result | **PASS**: the payload returns the phone to Fastboot automatically. The flash → run → observe loop needs no human |
-| Diagnostic bands (top → bottom) | Q1 entered at EL2 · Q2 LK left the watchdog enabled · Q3 reboot-mode write reads back 3 · Q4 register readable and changed. **Pending owner's reading** |
+| Diagnostic bands (top → bottom) | owner's reading: green sliver, **black**, green, **white**, green, **white**, green, **white** (no final green). Q1 EL2 entry = **no, so LK enters at EL1** (presumably under MediaTek GenieZone at EL2; ruby's MT6877 entered at EL2). Q2 watchdog enabled by LK = **yes** (payloads must feed it). Q3 reboot-mode reads back 3 = **yes**. Q4 register readable from EL1 and changed = **yes**. The missing bottom separator means the scanned-out buffer is offset a few rows from the modulo guess; harmless |
 | What was ruled out | the reboot-mode write being ignored (Fastboot was entered via the preloader path) |
 | Next smallest experiment | G2: topaz/ruby shim with stage bands, then XNU early framebuffer mark |

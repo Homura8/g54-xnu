@@ -7,7 +7,11 @@ SECTIONS
     .text : { KEEP(*(.text.entry)) *(.text*) }
     .rodata : { *(.rodata*) }
     .data : { *(.data*) }
+    . = ALIGN(16);
+    __bss_start = .;
     .bss : { *(.bss*) *(COMMON) }
+    . = ALIGN(16);
+    __bss_end = .;
     .stack (NOLOAD) : { *(.stack) }
     /DISCARD/ : { *(.comment*) *(.note*) *(.eh_frame*) }
 }

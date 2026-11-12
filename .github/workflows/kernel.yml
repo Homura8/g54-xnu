@@ -130,6 +130,16 @@ jobs:
           ccache -s
           test -z "$(ls -A "$KDKROOT")" || { echo "KDKROOT was populated"; exit 1; }
 
+      # build.sh skips (with only a warning) any patch that fails `git apply
+      # --check`, so prove every G54 patch is really in the built tree.
+      - name: G54 patches applied
+        run: |
+          shopt -s nullglob
+          for p in patches/*.patch; do
+            git -C dxb/xnu apply --reverse --check "$GITHUB_WORKSPACE/$p" || { echo "NOT APPLIED: $p"; exit 1; }
+            echo "applied: $p"
+          done
+
       - name: Collect and gate
         if: always()
         run: |

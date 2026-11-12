@@ -135,9 +135,9 @@ def tool(name):
     raise PackError(f"{name} not found (brew install llvm lld)")
 
 
-def build(out_dir, phase1=None, phase2=None):
+def build(out_dir, phase1=None, phase2=None, extra_defs=()):
     os.makedirs(out_dir, exist_ok=True)
-    defs = []
+    defs = [f"-D{d}" for d in extra_defs]
     if phase1 is not None:
         defs.append(f"-DPHASE1_S={int(phase1)}")
     if phase2 is not None:
@@ -182,6 +182,7 @@ def main(argv=None):
     b.add_argument("--out", default="out/g1")
     b.add_argument("--phase1", type=int)
     b.add_argument("--phase2", type=int)
+    b.add_argument("-D", dest="defs", action="append", default=[], help="extra C define (e.g. TEST_FAULT)")
     p = sub.add_parser("pack")
     p.add_argument("--stock", required=True)
     p.add_argument("--payload", required=True)
@@ -193,7 +194,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     try:
         if a.cmd == "build":
-            binf = build(a.out, a.phase1, a.phase2)
+            binf = build(a.out, a.phase1, a.phase2, a.defs)
             data = open(binf, "rb").read()
             print(f"probe {binf} {len(data)} bytes sha256={sha256(data)}")
         elif a.cmd == "pack":
