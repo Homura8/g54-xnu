@@ -1,7 +1,7 @@
 # G54 hardware iteration loop — fast route to an iOS home screen
 
 **Target:** get the real iPhone X / iOS 16.7.16 userland to SpringBoard on
-Moto G54 5G (\`cancunf\`, XT2343-2). An early XNU marker is a **diagnostic
+Moto G54 5G (`cancunf`, XT2343-2). An early XNU marker is a **diagnostic
 milestone**, not the final objective. Make the smallest measurable experiment,
 run it on this actual phone when access and permission exist, diagnose, repeat.
 Follow [AGENTS.md](../AGENTS.md) and the live [status](status.md).
@@ -14,14 +14,14 @@ phone-free agent can do all host preparation but must not claim a hardware boot.
 ## 0. Resume correctly
 
 - Work in **g54-xnu**, not Celestia Nexus. Preserve existing local work and
-  inspect \`git status\`, branches, PRs, \`AGENTS.md\`, \`docs/status.md\` and
-  \`docs/device-facts.md\`. PR #4 is still an open read-only M1 preflight PR as
+  inspect `git status`, branches, PRs, `AGENTS.md`, `docs/status.md` and
+  `docs/device-facts.md`. PR #4 is still an open read-only M1 preflight PR as
   of this workflow's creation; inspect whether it has been merged.
 - **Do not assume the earlier M1 firmware is still installed.** On
   2026-11-12 UTC the phone was observed on Android 15
-  \`V1TDS35H.83-20-5-8-3\`, slot A, with an unlocked bootloader. The owner later
-  reported an OTA to \`...5-8-4\` underway. Motorola Software Fix downloaded a
-  different \`...5-8-6\` package to Windows; it was *not* verified as the
+  `V1TDS35H.83-20-5-8-3`, slot A, with an unlocked bootloader. The owner later
+  reported an OTA to `...5-8-4` underway. Motorola Software Fix downloaded a
+  different `...5-8-6` package to Windows; it was *not* verified as the
   currently installed image. At start of each physical session, recheck the
   fingerprint, bootloader, slot and rollback/recovery constraints.
 - The local Mac can reach the physical G54 over **ADB/Fastboot when connected
@@ -37,7 +37,7 @@ phone-free agent can do all host preparation but must not claim a hardware boot.
 
 Run **read-only** checks and log only sanitised conclusions:
 
-\`\`\`sh
+```sh
 git status --short
 python3 scripts/check_repo.py
 python3 -m unittest discover -s scripts -p 'test_*.py'
@@ -49,15 +49,15 @@ adb shell getprop ro.boot.slot_suffix
 adb shell getprop ro.boot.flash.locked
 adb shell getprop ro.boot.verifiedbootstate
 adb shell getprop ro.bootloader
-\`\`\`
+```
 
-If the phone is in bootloader Fastboot, use \`fastboot devices\`,
-\`fastboot getvar product\`, \`fastboot getvar current-slot\`,
-\`fastboot getvar securestate\`, and \`fastboot getvar is-userspace\` as needed.
+If the phone is in bootloader Fastboot, use `fastboot devices`,
+`fastboot getvar product`, `fastboot getvar current-slot`,
+`fastboot getvar securestate`, and `fastboot getvar is-userspace` as needed.
 **FastbootD is not bootloader Fastboot.** Both modes must be identified rather
 than assumed interchangeable. Use only one connected phone; if the tool lists
-more, stop. Read-only collector: \`python3 scripts/m1_facts.py adb\` or
-\`python3 scripts/m1_facts.py fastboot\` in its respective mode.
+more, stop. Read-only collector: `python3 scripts/m1_facts.py adb` or
+`python3 scripts/m1_facts.py fastboot` in its respective mode.
 
 After an OTA, don't silently trust prior partition contents, security-state
 data, inactive slot contents, rollback counters or firmware hashes. If OTA is
@@ -65,20 +65,20 @@ running, let it finish; don't interrupt it for experiments.
 
 ### Offline firmware preparation
 
-- Identify local **Motorola Software Fix** package and \`flashfile.xml\` /
-  \`servicefile.xml\`. Extract and analyse locally without running the XML's
+- Identify local **Motorola Software Fix** package and `flashfile.xml` /
+  `servicefile.xml`. Extract and analyse locally without running the XML's
   operations. Check ZIP integrity, version, product, variant, region,
   CID **where actually observed**, XML file checksums, and component
   rollback restrictions. Store copies *outside Git*; SHA-256 each source.
-- \`...5-8-6\` downloaded while \`...5-8-3\` was installed. A higher suffix
+- `...5-8-6` downloaded while `...5-8-3` was installed. A higher suffix
   does **not** prove a compatible backup, safe downgrade, or current firmware.
   Get the actual post-OTA build before choosing a restore image. Do not
   accidentally flash a future/older build to the phone.
-- Existing host tools: \`python3 scripts/m1_facts.py bootimg ...\` and
-  \`python3 scripts/m1_facts.py dtb ...\`. Inspect \`boot\`, \`vendor_boot\`,
-  \`dtbo\`, \`vbmeta*\` and \`lk\` as *offline files*. Cross-check with AOSP
-  boot v3/v4 layouts and \`cancunf\` source, but never substitute community
-  values for observations. \`init_boot\` was absent from M1 partition listing.
+- Existing host tools: `python3 scripts/m1_facts.py bootimg ...` and
+  `python3 scripts/m1_facts.py dtb ...`. Inspect `boot`, `vendor_boot`,
+  `dtbo`, `vbmeta*` and `lk` as *offline files*. Cross-check with AOSP
+  boot v3/v4 layouts and `cancunf` source, but never substitute community
+  values for observations. `init_boot` was absent from M1 partition listing.
 - Confirm a **known-good, matching restoration route**: tested official
   Motorola recovery process or reproducibly verified images and command
   sequence for this build, known-working Fastboot access even if Android won't
@@ -106,7 +106,7 @@ marker. A silent or timed-out boot is a failed experiment, not success.
 
 ## 3. Execute the fastest *recoverable* loop
 
-\`\`\`text
+```text
 Discover connected phone + actual firmware + consent
    -> prepare known-good restore artifacts, verify hashes and restore route
    -> choose ONE hypothesis and success/failure signal
@@ -116,13 +116,13 @@ Discover connected phone + actual firmware + consent
    -> run one approved test; capture screen/logs/panic/bootloader result
    -> restore to known-good state if needed; verify phone/slot
    -> record result + next hypothesis; repeat
-\`\`\`
+```
 
-- Prefer \`fastboot boot\` **only if this exact bootloader supports it**, not
+- Prefer `fastboot boot` **only if this exact bootloader supports it**, not
   because a Xiaomi or Pixel does. G54-specific reports suggest it may be
   unimplemented. Do not probe it with an unverified image.
 - If temporary boot is unavailable, G54 community installation guides report
-  FastbootD (\`is-userspace: yes\`) and timestamp/preflash-validation issues.
+  FastbootD (`is-userspace: yes`) and timestamp/preflash-validation issues.
   **First establish a tested recovery path and precise acceptable target**;
   don't blindly copy instructions for another firmware or custom ROM.
 - Device write scope must be agreed for the current session. The owner has
@@ -146,7 +146,7 @@ For every test record a private run card with date UTC, repo commit, toolchain
 and CI run, installed firmware/slot, stock/experimental image SHA-256, partition
 and execution method, hypothesis, result, log/photograph path, restored state,
 and next experiment. Use [run card template](experiments/TEMPLATE.md). Keep
-private logs and binary inputs in ignored \`facts/\`, \`out/\`, \`dumps/\` or
+private logs and binary inputs in ignored `facts/`, `out/`, `dumps/` or
 an external folder; publish **only explicitly sanitised conclusions**.
 
 - Successful CI proves kernel **compilation/identity**, not LK acceptance or
@@ -175,8 +175,8 @@ an external folder; publish **only explicitly sanitised conclusions**.
    **Their MT6877 addresses/128 MiB v2 header/slot behaviour are not G54 facts.**
 2. [ios-spes](https://github.com/AdyaGMD/ios-spes) first validated a live
    FDT and RAM-only diagnostic PID 1, then read-only storage probes and
-   userspace; its \`NOTES.md\` tracks one-variable changes and failed results.
-   Its Qualcomm phone supports RAM-only \`fastboot boot\`, unlike the
+   userspace; its `NOTES.md` tracks one-variable changes and failed results.
+   Its Qualcomm phone supports RAM-only `fastboot boot`, unlike the
    *unverified* G54 route.
 3. [PixOS AI development](https://github.com/PixOS-Project/pixelios-kernel/blob/main/docs/AI_DEVELOPMENT.md)
    describes agent-authored tests, scripted hardware experiments, independent
