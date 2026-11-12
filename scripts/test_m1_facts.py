@@ -163,6 +163,7 @@ class SafetyTests(unittest.TestCase):
         values = m.parse_getvar(text)
         self.assertEqual(m.parse_getvar("(bootloader) unlocked:no")["unlocked"], "no")
         self.assertEqual(values["unlocked"], "no")
+        self.assertEqual(m.parse_getvar("product: cancunf\nserialno: ABCD")["product"], "cancunf")
         self.assertEqual(values["partition-size:boot_a"], "0x4000000")
         self.assertTrue(m.redact_pairs(values)["imei"].startswith("REDACTED:"))
 
@@ -186,7 +187,8 @@ elif args == ["shell", "uname", "-a"]: print("Linux localhost 5.10 aarch64")
 elif args == ["devices"]: print("ZY22SECRET1 fastboot")
 elif args == ["getvar", "all"]:
     sys.stderr.write("(bootloader) unlocked: no\n(bootloader) imei: 351234567890123\n"
-                     "(bootloader) serialno: ZY22SECRET1\n(bootloader) current-slot: a\n")
+                     "(bootloader) serialno: ZY22SECRET1\n(bootloader) current-slot: a\n"
+                     "factory note: PRIVATE-UNPARSED-9988\n")
 """
 
 
@@ -227,6 +229,35 @@ class CollectorTests(unittest.TestCase):
             text = file.read_text()
             self.assertNotIn("ZY22SECRET1", text, file.name)
             self.assertNotIn("351234567890123", text, file.name)
+            self.assertNotIn("PRIVATE-UNPARSED-9988", text, file.name)
+
+    def test_fastboot_rejects_ambiguous_devices(self):
+        path = Path(self.tmp.name, "bin", "fastboot")
+        path.write_text('#!/bin/sh\nprintf "FIRST\tfastboot\nSECOND\tfastboot\n"\n')
+        with mock.patch("sys.stdout"), self.assertRaises(SystemExit):
+            m.main(["--out", str(self.out), "fastboot"])
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_fastboot_rejects_failed_getvar(self):
+        path = Path(self.tmp.name, "bin", "fastboot")
+        path.write_text('#!/bin/sh\nif [ "$1" = "devices" ]; then echo "SERIAL fastboot"; else echo "(bootloader) unlocked: no"; exit 1; fi\n')
+        with mock.patch("sys.stdout"), self.assertRaises(SystemExit):
+            m.main(["--out", str(self.out), "fastboot"])
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_fastboot_rejects_unparseable_getvar(self):
+        path = Path(self.tmp.name, "bin", "fastboot")
+        path.write_text('#!/bin/sh\nif [ "$1" = "devices" ]; then echo "SERIAL fastboot"; else echo "No getvars available"; fi\n')
+        with mock.patch("sys.stdout"), self.assertRaises(SystemExit):
+            m.main(["--out", str(self.out), "fastboot"])
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_adb_rejects_failed_getprop(self):
+        path = Path(self.tmp.name, "bin", "adb")
+        path.write_text('#!/bin/sh\nif [ "$1" = "get-state" ]; then echo device; else echo "Permission denied" >&2; exit 1; fi\n')
+        with mock.patch("sys.stdout"), self.assertRaises(SystemExit):
+            m.main(["--out", str(self.out), "adb"])
+        self.assertEqual(list(self.out.iterdir()), [])
 
     def test_failed_collection_leaves_no_empty_run(self):
         Path(self.tmp.name, "bin", "adb").write_text("#!/bin/sh\necho 'error: no devices' >&2\nexit 1\n")
