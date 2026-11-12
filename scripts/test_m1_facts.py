@@ -157,6 +157,16 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(redacted["ro.build.fingerprint"], "motorola/x/y")
         self.assertNotIn("ZY22ABCDEF", m.redact_text("serial ZY22ABCDEF here", ["ZY22ABCDEF"]))
 
+    def test_motorola_unit_identifiers_redacted(self):
+        getvar = {"chipid[0]": "00112233AABB", "chipid[1]": "CCDD", "esimid": "89000000000000000000000000000001",
+                  "battid": "TESTBATT01",
+                  "product": "cancunf", "securestate": "flashing_unlocked", "slot-unbootable:_a": "no"}
+        redacted = m.redact_pairs(getvar)
+        for key in ("chipid[0]", "chipid[1]", "esimid", "battid"):
+            self.assertTrue(redacted[key].startswith("REDACTED:"), key)
+        for key in ("product", "securestate", "slot-unbootable:_a"):
+            self.assertEqual(redacted[key], getvar[key])
+
     def test_getvar_parsing_including_continuations(self):
         text = "(bootloader) imei: 351234567890123\n(bootloader) unlocked: no\n(bootloader) ro.carrier: retgb\n" \
                "(bootloader) partition-size:boot_a: 0x4000000\nall: listed above\n"

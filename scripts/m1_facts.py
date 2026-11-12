@@ -83,8 +83,11 @@ def run(tool_path: str, tool: str, args: list[str], timeout: float = TIMEOUT) ->
 
 # --- privacy -----------------------------------------------------------------------
 
+# Motorola `getvar all` also prints per-unit `chipid[N]`, `esimid` (eUICC EID)
+# and `battid`; seen in the 2026-11-12 G54 session, so they are redacted too.
 SENSITIVE = re.compile(r"serial|imei|meid|iccid|imsi|msisdn|mac|uid|uuid|token|cert|key|sn$|barcode|"
-                       r"phone|number|account|android_id|fingerprint_id|ssn", re.IGNORECASE)
+                       r"phone|number|account|android_id|fingerprint_id|ssn|chipid|socid|esim|^eid$|"
+                       r"battid|devinfo", re.IGNORECASE)
 SAFE_KEYS = re.compile(r"^(ro\.product\.model_?.*|ro\.build\..*|.*\.machine|.*\.keyboard.*)$")
 
 

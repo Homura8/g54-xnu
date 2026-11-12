@@ -5,14 +5,15 @@
 | Milestone | Needs the phone | State |
 | --- | --- | --- |
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
-| **M1** device facts and safety baseline | read-only first | **ADB and Fastboot collected 2026-11-12 UTC** on unlocked XT2343-2; firmware/DTB/recovery analysis still pending ([observed facts](device-facts.md)) |
-| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **not started**; recovery/boot-entry route unverified; follow [hardware loop](hardware-loop.md) |
+| **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
+| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
+| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **UFS done 2026-11-12** ([E6–E14](experiments/2026-11-12-e6-e8-ufs.md)): LK leaves the device in reset; the probe's vendor-order reset + `fDeviceInit` lets XNU find `userdata` (LUN 2, 114,359 MiB) and try `ufsroot0`. Root image not flashed yet |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
-appears; (3) kernel log on screen. An in-RAM test is preferred **only if this G54 supports `fastboot boot`**.
-G54 community reports raise doubt. Determine an approved recoverable execution
-path before writing anything, and link each observed milestone to an image hash.
+appears; (3) kernel log on screen. RAM boot is **not** available (E0), so each
+step flashes `boot_a` and restores the verified stock 5-8-6 `boot.img`
+(SHA-256 `e0fe4010…`) afterwards. Link each observed milestone to an image hash.
 
 ## Why this route (decided 2026-11-12)
 
@@ -47,25 +48,40 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## Next concrete steps (13 November 2026)
+## Next concrete steps (12 November 2026 UTC, after E14)
 
-1. **Use the connected phone**, if present, under [the agent-led hardware
-   loop](hardware-loop.md). The owner has explicitly unlocked the bootloader;
-   verified M1 Android+Fastboot data are recorded in [device-facts.md](device-facts.md).
-   The phone was later reported OTA-updating from `...5-8-3` to `...5-8-4`;
-   **re-read actual firmware/slot after OTA** rather than assuming completion.
-2. Extract and verify the locally copied Motorola Software Fix
-   `V1TDS35H.83-20-5-8-6` firmware *offline*. It is **not** a matching backup
-   until current firmware, component compatibility, rollback and a working
-   restore path have been verified. Read the real v4-style boot/vendor_boot
-   headers, DTBs and LK behaviour; never copy ruby's v2 format or addresses.
-3. Prepare the smallest observable execution payload with a recoverable and
-   authorised G54-specific boot route. Distinguish accepted image, entered
-   payload, early XNU and iOS userspace; advance on evidence. The **goal**
-   is iOS 16.7.16 SpringBoard, not merely a coloured pixel.
-4. When implementing a real G54 XNU patch, update patchset pins and record-only
-   exec-data gate per [build.md](build.md), then run focused CI. Reuse unchanged
-   K0 artifacts in the meantime.
+**Phone state at handover:** unlocked, 5-8-6, slot A, `boot_a` = the E14 XNU
+image (Android won't boot until the stock `boot.img` is flashed back);
+`userdata` still holds Android data. Latest kernel: K2 = 0200+0201, CI run
+43265320296. Rebuild every input with `docs/hardware-loop.md` §3b. The decoded
+D22AP tree is made by extracting `Firmware/all_flash/DeviceTree.d22ap.im4p`
+from the IPSW and LZFSE-decoding its IM4P payload (macOS `libcompression`,
+algorithm 0x801) into `out/ipsw/d22ap.adt`.
+
+1. **Build the iOS root** on the Mac (needs sudo; ~20 GB free):
+   `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
+   (ask the owner to run it: it needs their sudo password)
+   (macOS port of topaz `mkiosroot.sh`; untested yet). The decoded D22AP
+   tree for `/product` is `out/ipsw/d22ap.adt` (pass `--d22ap`).
+2. **Flash it:** `fastboot flash userdata out/root/ios16-root.img`. This erases
+   Android userdata; it is revertible with `fastboot -w` plus the stock boot.img.
+3. **Boot:** build with `--probe out/g1-ufs` (`-D UFS_FIX`), `--ufs --d22ap
+   out/ipsw/d22ap.adt`, kernel K2 (CI run 43265320296), cmdline as topaz:
+   `debug=0xc serial=3 cpus=1 keepsyms=1 -noprogress rd=ufsroot0
+   ufsrw=1 rootrw=1 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1
+   ignition_level=1 wdt=-1 wdt_test=no_user_checkin g54panicreset=45`.
+   Expect slow I/O (PWM link) and then launchd.
+4. Then: UFS HS gear, `cpus=6`, USB log channel (ruby `ruby_usb`), input.
+
+### Safety notes learned this session
+
+- `fastboot boot` answers `OKAY` without booting. Never read that as success.
+- LK's `set_active` warns that the target slot's bootloader images may be
+  invalid (brick risk), and slot B still holds 5-8-4. Do not switch slots.
+- Never run the package's `flashfile.xml` wholesale: it flashes preloader, LK,
+  TEE, GPT and efuseBackup, and erases `nvdata`.
+- Wait for the post-OTA Virtual A/B merge (`snapshot-update-status=none`, no
+  `*-cow` mapper devices; merge starts 300 s after boot) before any write.
 
 ## Observed G54 hardware checkpoint (2026-11-12 UTC)
 
