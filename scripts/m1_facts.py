@@ -107,7 +107,7 @@ def parse_getvar(text: str) -> dict[str, str]:
     values = {}
     for line in text.splitlines():
         # Keys may contain colons ("partition-size:boot_a: 0x4000000"); keys have no spaces.
-        match = re.match(r"^\(bootloader\)\s+(\S+):\s*(.*)$", line.strip())
+        match = re.match(r"^(?:\(bootloader\)\s+)?(\S+):\s*(.*)$", line.strip())
         if match:
             key = match[1].strip()
             values[key] = (values[key] + match[2]) if key in values else match[2].strip()
@@ -325,7 +325,12 @@ def collect_adb(out: Path) -> dict:
     if state.get("stdout", "").strip() != "device":
         raise SystemExit("No single authorised Android device: enable USB debugging, accept the prompt "
                          "on the phone, and check `adb devices`. " + state.get("stderr", "").strip())
-    props = parse_getprop(call("shell", "getprop").get("stdout", ""))
+    props_entry = call("shell", "getprop")
+    if props_entry.get("returncode") != 0:
+        raise SystemExit("adb shell getprop failed; verify USB authorisation and try again.")
+    props = parse_getprop(props_entry.get("stdout", ""))
+    if not props:
+        raise SystemExit("adb shell getprop returned no parseable properties; no report saved.")
     facts = {"getprop": redact_pairs(props), "reads": {}, "lists": {}}
     for path in ("/proc/cpuinfo", "/proc/meminfo", "/proc/version", "/sys/devices/system/cpu/possible",
                  "/proc/device-tree/compatible", "/proc/device-tree/model",
@@ -376,15 +381,24 @@ def adb_summary(props: dict, facts: dict) -> dict:
 def collect_fastboot(out: Path) -> dict:
     fastboot = tool_path("fastboot")
     devices = run(fastboot, "fastboot", ["devices"])
-    if not devices.get("stdout", "").strip():
-        raise SystemExit("No phone in fastboot mode (`fastboot devices` is empty).")
+    if devices.get("returncode") != 0:
+        raise SystemExit("fastboot devices failed; check the cable and platform tools.")
+    connected = [parts[0] for line in devices.get("stdout", "").splitlines()
+                 if len(parts := line.split()) >= 2 and parts[1].startswith("fastboot")]
+    if len(connected) != 1:
+        raise SystemExit(f"Expected exactly one phone in fastboot mode, found {len(connected)}.")
     entry = run(fastboot, "fastboot", ["getvar", "all"], timeout=60)
-    text = entry.get("stdout", "") + entry.get("stderr", "")  # fastboot prints getvar output on stderr
+    if entry.get("returncode") != 0:
+        raise SystemExit("fastboot getvar all failed or timed out; no report saved.")
+    text = entry.get("stdout", "") + entry.get("stderr", "")  # fastboot often prints on stderr
     values = parse_getvar(text)
-    secrets = [value for key, value in values.items() if SENSITIVE.search(key)]
-    secrets += [line.split()[0] for line in devices["stdout"].splitlines() if line.split()]
-    (out / "getvar-all.txt").write_text(redact_text(text, secrets))
+    if not values:
+        raise SystemExit("fastboot getvar all returned no parseable variables; no report saved.")
     redacted = redact_pairs(values)
+    # Never persist unparsed fastboot lines: they may contain device identifiers or unlock data.
+    # The parsed key/value view still preserves every recognized variable for boot analysis.
+    (out / "getvar-all.txt").write_text(
+        "".join(f"{key}: {value}\\n" for key, value in redacted.items()))
     keys = ("product", "variant", "unlocked", "securestate", "is-userspace", "current-slot", "slot-count",
             "max-download-size", "version-bootloader", "hw-revision", "partition-size:boot_a",
             "partition-size:vendor_boot_a", "partition-size:init_boot_a", "partition-size:lk_a")
