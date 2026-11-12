@@ -7,7 +7,8 @@
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
-| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **UFS done 2026-11-12** ([E6–E14](experiments/2026-11-12-e6-e8-ufs.md)). **[E15](experiments/2026-11-12-e15-ios-root.md):** iOS 16.7.16 HFS+ root built, checked and flashed to `userdata`; first boot issued at 17:58:35 UTC. Root mounting and launchd still await on-screen evidence |
+| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **done 2026-11-12**: [E15](experiments/2026-11-12-e15-ios-root.md) owner photos show iOS 16.7.16 HFS+ root mounted read-write, real Apple launchd PID 1 and early boot complete |
+| **M5** graphical iOS interface | yes | E15 shows `exec SpringBoard`, with no GUI. [E16](experiments/2026-11-12-e16-six-a55.md): owner confirms six A55s initialized with SGI1 verification; later boot result pending. Next: current boot's process samples / storage speed |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -74,10 +75,11 @@ Direct raw flashing stopped on the host with `Failed reading from userdata`
 before any transfer; convert with upstream `img2simg` first (see below).
 The verified sparse root was subsequently flashed successfully (45 chunks,
 383.684 seconds), then the prepared boot image was flashed to `boot_a`.
-The first iOS-root test was rebooted at 17:58:35 UTC; on-screen results
-remain pending. See [E15](experiments/2026-11-12-e15-ios-root.md).
+The first iOS-root test was rebooted at 17:58:35 UTC. Owner photos confirm
+the writable HFS+ root, real launchd, early boot complete and `exec SpringBoard`,
+with no GUI. See [E15](experiments/2026-11-12-e15-ios-root.md).
 
-**Current phone state:** unlocked, 5-8-6, slot A, `boot_a` = the E15 XNU
+**Current phone state:** unlocked, 5-8-6, slot A, `boot_a` = the E16 six-A55 XNU
 image; `userdata` holds the iOS root. Android restoration requires stock
 `boot.img` and a userdata reset. Latest kernel: K2 = 0200+0201, CI run
 43265320296. Rebuild every input with `docs/hardware-loop.md` §3b. The decoded
@@ -85,12 +87,18 @@ D22AP tree is made by extracting `Firmware/all_flash/DeviceTree.d22ap.im4p`
 from the IPSW and LZFSE-decoding its IM4P payload (macOS `libcompression`,
 algorithm 0x801) into `out/ipsw/d22ap.adt`.
 
-1. **Build the iOS root** on the Mac (needs sudo; ~20 GB free):
+1. **Observe E16 before another reboot.** Six A55s are verified. Capture the
+   `SMP SpringBoard` / `SMP backboardd` blocks from the existing periodic
+   process sampler if no GUI appears. The known upstream ICL/MobileGestalt
+   deadlock is a hypothesis until the G54's stacks identify it. Storage
+   remains in PWM slow-auto mode; test a bounded link-speed change separately.
+2. **For root reconstruction only** (E15 is already built and flashed):
+   build on the Mac (needs sudo; ~20 GB free):
    `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
    (ask the owner to run it: it needs their sudo password)
    (macOS port of topaz `mkiosroot.sh`; full host build now verified). The decoded D22AP
    tree for `/product` is `out/ipsw/d22ap.adt` (pass `--d22ap`).
-2. **Convert to Android sparse and flash it:** use upstream
+   **Convert to Android sparse and flash it:** use upstream
    `anestisb/android-simg2img` at
    `a6fcc0f1c61b2aa5b55516829cd7d13dbfbacb91` (`make img2simg simg2img`),
    then `img2simg out/root/ios16-root.img out/root/ios16-root.simg`.
@@ -99,11 +107,11 @@ algorithm 0x801) into `out/ipsw/d22ap.adt`.
    Android userdata; it is revertible with `fastboot -w` plus the stock boot.img.
 3. **Boot:** build with `--probe out/g1-ufs` (`-D UFS_FIX`), `--ufs --d22ap
    out/ipsw/d22ap.adt`, kernel K2 (CI run 43265320296), cmdline as topaz:
-   `debug=0xc serial=3 cpus=1 keepsyms=1 -noprogress rd=ufsroot0
+   `debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0
    ufsrw=1 rootrw=1 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1
    ignition_level=1 wdt=-1 wdt_test=no_user_checkin g54panicreset=45`.
-   Expect slow I/O (PWM link) and then launchd.
-4. Then: UFS HS gear, `cpus=6`, USB log channel (ruby `ruby_usb`), input.
+   Use `cpus=1` to reproduce E15 or isolate an SMP regression.
+4. Then: UFS HS gear, USB log channel (ruby `ruby_usb`), input.
 
 ### Safety notes learned this session
 
