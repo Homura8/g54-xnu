@@ -5,6 +5,8 @@ its source and date. **Status `unknown` means nobody has observed it; do not
 fill it from a spec sheet, a forum post or another phone.** Collect read-only
 facts first; nothing here needs an unlocked bootloader unless marked.
 
+**First time connecting the phone? Follow the [read-only M1 session checklist](first-session.md) before running the commands below.**
+
 ## How to collect (read-only)
 
 `scripts/m1_facts.py` gathers most rows below. It cannot change the phone: every
