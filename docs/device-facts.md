@@ -1,5 +1,36 @@
 # G54 device facts (milestone M1)
 
+## Observed on the owner's XT2343-2 (12 November 2026 UTC)
+
+These are **historical observations**, not assertions about the phone
+following its later OTA. Sources: private
+`facts/20261112T143123Z-adb`,
+`facts/20261112T143344Z-fastboot` and direct read-only Android properties.
+The original reports remain local and uncommitted. **Recheck after any OTA.**
+
+| Field | Observed value |
+| --- | --- |
+| Model / device / SKU | moto g54 5G / `cancunf` / `XT2343-2` |
+| SoC / core types | `MT6855V/AZA`, Cortex-A55 and Cortex-A78 (counts unverified) |
+| Software channel | `retapac` |
+| Android / launch API | Android 15 / 33 |
+| Build | `V1TDS35H.83-20-5-8-3` |
+| Build fingerprint | `motorola/cancunf_g_sysn/cancunf:15/V1TDS35H.83-20-5-8-3/6e233-fa3e4:user/release-keys` |
+| Bootloader | `MBM-3.1-cancunf_g_vext-31a87-V1TDS35H.83-20-5-8-3-6e233` |
+| Lock state | Android `ro.boot.flash.locked=0`, `verifiedbootstate=orange`; Fastboot `securestate=flashing_unlocked` |
+| A/B | slot A active; 2 slots |
+| Fastboot mode / download limit | bootloader Fastboot (`is-userspace=no`); 268435456 bytes maximum download |
+| Visible named partitions | `boot`, `vendor_boot`, `dtbo`, `lk`, `vbmeta`, `vbmeta_system`, `super`, others |
+| `init_boot` | not seen in the `/dev/block/by-name` listing; absence not independently verified |
+| Panel/LK framebuffer | unknown; Linux `/sys/class/graphics/fb0` not present |
+| Boot header, runtime DTB, storage LUN, recovery, temporary boot | unknown |
+
+**Firmware caution:** the owner subsequently reported Android OTA
+`...5-8-4` in progress and downloaded a separate Motorola Software Fix
+`...5-8-6` package, not yet proven to match the current installed firmware.
+Neither the OTA's completion nor any package compatibility is established
+here. See [hardware-loop.md](hardware-loop.md) for the current procedure.
+
 Every porting decision below depends on these facts. Record each value with
 its source and date. **Status `unknown` means nobody has observed it; do not
 fill it from a spec sheet, a forum post or another phone.** Collect read-only
@@ -28,21 +59,21 @@ root and is not part of M1.
 
 | Fact | Value | Source / how to obtain | Status |
 | --- | --- | --- | --- |
-| Exact model number (XT…) and region/carrier | | Settings → About phone; box label | unknown |
-| Device codename | | `adb shell getprop ro.product.device` | unknown |
-| SoC | MT6855 (owner-reported) | `adb shell getprop ro.board.platform`, `ro.soc.model`, `/proc/cpuinfo` | unconfirmed |
-| CPU clusters | | `/sys/devices/system/cpu/cpu*/cpu_capacity`, `cpuinfo` part numbers (A55 = 0xd05, A78 = 0xd41) | unknown |
+| Exact model number (XT…) and region/carrier | XT2343-2 / retapac software channel | `ro.boot.hardware.sku`; `ro.carrier` | observed 2026-11-12 |
+| Device codename | cancunf | `adb shell getprop ro.product.device` | observed 2026-11-12 |
+| SoC | MT6855V/AZA | `adb shell getprop ro.board.platform`, `ro.soc.model` | observed 2026-11-12 |
+| CPU clusters | Cortex-A55 + Cortex-A78 types; counts/affinity not confirmed | MIDR via M1 collector | observed types, counts unknown |
 | RAM size | | `/proc/meminfo` | unknown |
 | Storage type (UFS/eMMC) | | `adb shell ls /dev/block/by-name`, `getprop ro.boot.bootdevice` | unknown |
-| Android version / launch API level | | `getprop ro.build.version.release`, `ro.product.first_api_level` | unknown |
-| A/B slots, current slot | | `getprop ro.boot.slot_suffix`; `fastboot getvar current-slot` | unknown |
+| Android version / launch API level | 15 / 33 (pre-OTA) | `getprop ro.build.version.release`, `ro.product.first_api_level` | observed 2026-11-12 |
+| A/B slots, current slot | two slots / A | `getprop ro.boot.slot_suffix`; `fastboot getvar current-slot`, `slot-count` | observed 2026-11-12 |
 | Boot image header version | | `getprop ro.boot.boot_image_version`? else unpack the stock `boot` image | unknown |
-| `vendor_boot` / `init_boot` present | | `ls /dev/block/by-name` | unknown |
+| `vendor_boot` / `init_boot` present | vendor_boot listed; init_boot not listed | `ls /dev/block/by-name` | observed 2026-11-12 |
 | Where the DTB lives | | stock `boot`/`vendor_boot`/`dtbo` unpacked on the host | unknown |
 | Panel resolution, framebuffer address and stride left by LK | | DTB `framebuffer`/`memory` reservations; later confirmed on device | unknown |
-| Bootloader unlock eligibility | | Motorola's official unlock programme for this exact model/carrier | unknown |
-| `fastboot getvar all` | | fastboot mode, read-only | unknown |
-| `fastboot boot` (RAM boot) accepted | | **needs unlock + owner approval**; test with the stock image first | unknown |
+| Bootloader unlock eligibility | unlocked | Motorola's eligibility, Fastboot `securestate=flashing_unlocked`, ADB `ro.boot.flash.locked=0` | observed 2026-11-12 |
+| `fastboot getvar all` | product=cancunf, slot A/2, bootloader Fastboot, 256 MiB download; other variables may be absent | Fastboot M1 collector | observed 2026-11-12 |
+| `fastboot boot` (RAM boot) accepted | unknown; reports of unsupported command | **device-specific validated test only after matching recovery** | unknown |
 | Recovery path if a boot fails | | stock firmware for this exact model + a tested restore procedure | unknown |
 | Touch controller, PMIC/charger, display bridge | | DTB compatibles, `dmesg` | unknown |
 
