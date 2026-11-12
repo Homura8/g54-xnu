@@ -63,7 +63,12 @@ upstream's constant did not override its import-time default argument, so the
 generated tree silently lacked `/product`. The rebuilt tree now matches all
 61 supplied D22AP product properties. The full privileged root build and
 first iOS-root boot remain pending; the owner must run the sudo command below
-in their Terminal.
+in their Terminal. The first privileged attempt reached HFS+ formatting but
+failed at `diskutil enableOwnership` on a manual mount; cleanup left that
+output mounted. The builder now reattaches the formatted raw image with
+`hdiutil -owners on` and explicitly unmounts it during cleanup. A disposable
+32 MiB raw HFS+ test of that attach method reported
+`GlobalPermissionsEnabled=true`; the full copy is still unverified.
 
 **Phone state at handover:** unlocked, 5-8-6, slot A, `boot_a` = the E14 XNU
 image (Android won't boot until the stock `boot.img` is flashed back);

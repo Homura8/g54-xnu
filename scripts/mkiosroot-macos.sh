@@ -38,6 +38,9 @@ OS=087-86698-044.dmg SYSOS=087-86593-047.dmg APPOS=087-86715-047.dmg   # BuildMa
 work=$(mktemp -d "$(dirname "$out")/iosroot.XXXXXX")
 attached=()
 cleanup() {
+	# A manually mounted filesystem may not be known to Disk Arbitration.
+	# Unmount it explicitly before detaching its backing image.
+	if [[ -d $work/root ]]; then umount "$work/root" >/dev/null 2>&1 || true; fi
 	# /bin/bash 3.2 treats an empty array as unset under nounset.
 	for d in ${attached[@]+"${attached[@]}"}; do hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
 	rm -f "$work"/*.dmg
@@ -66,8 +69,14 @@ rdev=$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage "$out" | 
 attached=("$rdev" "${attached[@]}")
 newfs_hfs -s -J -v iOSRoot "$rdev"
 mkdir -p "$work/root"
-mount -t hfs "$rdev" "$work/root"
-diskutil enableOwnership "$work/root" >/dev/null
+# Reattach the formatted raw filesystem through DiskImages so ownership and
+# the mount point are registered together. diskutil enableOwnership cannot
+# resolve a mount made directly with mount(8) on this macOS release.
+hdiutil detach "$rdev" >/dev/null
+attached=("${attached[@]:1}")
+rdev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -noverify \
+	-owners on -mountpoint "$work/root" "$out" | awk 'NR==1{print $1}')
+attached=("$rdev" "${attached[@]}")
 R=$work/root
 
 copy() {
