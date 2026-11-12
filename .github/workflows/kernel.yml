@@ -1,0 +1,164 @@
+name: kernel
+
+# Builds the XNU 8796 kernel for the G54 port from pinned public sources:
+# ruby-ios-bringup's patch recipe (public ios-topaz baseline), this
+# repository's patches/, and blacktop/darwin-xnu-build. Nothing proprietary is
+# downloaded: KDKROOT points at an empty directory because the SWEET machine
+# config links no closed KDK library (xnu makedefs/MakeInc.def only force-loads
+# lib<config>.os.*.a for T6000/T8101/VMAPPLE). The exec-data gate proves the
+# result equals the reference kernel's code and data.
+
+on:
+  pull_request:
+    paths: ["config/**", "patches/**", ".github/workflows/kernel.yml"]
+  push:
+    branches: [main]
+    paths: ["config/**", "patches/**", ".github/workflows/kernel.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 240
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime,file_macro,pch_defines
+      CCACHE_MAXSIZE: 3G
+      CCACHE_WRAP: ${{ github.workspace }}/ccache-bin
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Load pins
+        run: |
+          python3 scripts/check_repo.py
+          grep -E '^[A-Z0-9_]+=' config/kernel.env >> "$GITHUB_ENV"
+          cat config/kernel.env | grep -E '^[A-Z0-9_]+='
+
+      - name: Check runner and Xcode (no drift)
+        run: |
+          sw_vers
+          echo "image: ${ImageOS:-?} ${ImageVersion:-?}"
+          XC="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [ ! -d "$XC" ]; then
+            echo "Xcode ${XCODE_VERSION} is not on this runner image:"; ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$XC"
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version | tee xcode-version.txt
+          grep -q "Build version ${XCODE_BUILD}$" xcode-version.txt || { echo "expected Xcode build ${XCODE_BUILD}"; exit 1; }
+          xcrun --find iig
+          xcrun clang --version | head -1
+          echo "preinstalled KDKs (not used):"; ls /Library/Developer/KDKs 2>/dev/null || echo none
+
+      - name: Fetch ruby-ios-bringup recipe
+        run: |
+          git init -q ruby
+          git -C ruby fetch -q --depth 1 "$RUBY_REPO" "$RUBY_SHA"
+          git -C ruby checkout -q FETCH_HEAD
+          test "$(git -C ruby rev-parse HEAD)" = "$RUBY_SHA"
+
+      - name: Assemble patchset (ruby gate, then G54 gate)
+        run: |
+          ALLOW_PUBLIC_UPSTREAM=1 PATCHSET_SHA256="$RUBY_PATCHSET_SHA256" \
+            BASE_REPO="$BASE_REPO" BASE_SHA="$BASE_SHA" BASELINE_MANIFEST_SHA256="$BASELINE_MANIFEST_SHA256" \
+            sh ruby/ci/prepare-baseline.sh base
+          shopt -s nullglob
+          for p in patches/*.patch; do
+            cp "$p" base/xnu/patches/
+            git -C base apply --stat "xnu/patches/$(basename "$p")" >/dev/null
+          done
+          actual=$(python3 ruby/ci/patchset_hash.py base/xnu/patches)
+          echo "g54 patchset: $actual"
+          test "$actual" = "$G54_PATCHSET_SHA256"
+
+      - name: Fetch build driver
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          test "$(git -C dxb rev-parse HEAD)" = "$DXB_SHA"
+          cp base/xnu/patches/*.patch base/xnu/patches/*.sh dxb/patches/
+          # Same two edits as ruby-ios-bringup: plain arm64 for a Cortex-A55 SoC
+          # (clang's apple-m1 default emits LSE atomics/LDAPR), and ccache wrappers.
+          sed -i '' "s/ARCHS=\"x86_64 arm64e\" VALID_ARCHS=\"x86_64 arm64e\"/ARCHS=\"arm64\" VALID_ARCHS=\"arm64\" OTHER_CFLAGS=\"-mkernel -nostdinc -Wno-packed -mcpu=${KERNEL_CPU}\"/" dxb/build.sh
+          test "$(grep -c "mcpu=${KERNEL_CPU}" dxb/build.sh)" = 1
+          sed -i '' 's|export CC="$(xcrun -find clang)"|export CC="$CCACHE_WRAP/clang"|; s|export CXX="$(xcrun -find clang++)"|export CXX="$CCACHE_WRAP/clang++"|' dxb/build.sh
+          test "$(grep -c 'export CC="$CCACHE_WRAP/clang"' dxb/build.sh)" = 1
+
+      - name: Dependencies
+        run: |
+          brew install jq gum bash cmake ninja ccache
+          # build.sh only checks that xcodes exists; Xcode is already selected
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          mkdir -p "$CCACHE_WRAP"
+          for t in clang clang++; do
+            printf '#!/bin/sh\nexec ccache %s "$@"\n' "$(xcrun -find $t)" > "$CCACHE_WRAP/$t"
+            chmod +x "$CCACHE_WRAP/$t"
+          done
+          # An empty KDK root: build.sh skips its KDK download when the directory exists.
+          mkdir -p "$RUNNER_TEMP/kdk-empty"
+          echo "KDKROOT=$RUNNER_TEMP/kdk-empty" >> "$GITHUB_ENV"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ hashFiles('config/kernel.env', 'patches/**') }}
+          restore-keys: ccache-
+
+      - name: Build
+        working-directory: dxb
+        env:
+          # bearssl.org is intermittent; the mirror carries the same pinned commit,
+          # checked by the baseline's 0020-stage-bearssl.sh.
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://github.com/status-im/BearSSL.insteadOf
+          GIT_CONFIG_VALUE_0: https://www.bearssl.org/git/BearSSL
+        run: |
+          ccache -z
+          bash build.sh
+          ccache -s
+          test -z "$(ls -A "$KDKROOT")" || { echo "KDKROOT was populated"; exit 1; }
+
+      - name: Collect and gate
+        if: always()
+        run: |
+          mkdir -p out
+          cp dxb/fakeroot/System/Library/Kernels/kernel.development.sweet out/ 2>/dev/null || { echo "no kernel built"; exit 1; }
+          (cd out && shasum -a 256 kernel.development.sweet > SHA256SUMS)
+          if [ -n "${KERNEL_EXPECT_EXEC_DATA}" ]; then
+            python3 ruby/ci/kernel_hash.py --expect-exec-data "$KERNEL_EXPECT_EXEC_DATA" out/kernel.development.sweet | tee out/kernel-hashes.txt
+          else
+            python3 ruby/ci/kernel_hash.py out/kernel.development.sweet | tee out/kernel-hashes.txt
+          fi
+          {
+            grep -E '^[A-Z0-9_]+=' config/kernel.env
+            echo "kdkroot=$KDKROOT (empty)"
+            echo "runner_image=${ImageOS:-?} ${ImageVersion:-?}"
+            echo "xcode=$(xcodebuild -version | tr '\n' ' ')"
+            echo "sdk=$(xcrun --sdk macosx --show-sdk-version)"
+            echo "clang=$(xcrun clang --version | head -1)"
+            echo "sw_vers=$(sw_vers | tr '\n' ' ')"
+            echo "brew=$(brew list --versions jq gum bash cmake ninja ccache | tr '\n' ';')"
+            echo "run_id=$GITHUB_RUN_ID commit=$GITHUB_SHA"
+          } > out/PROVENANCE.txt
+          cat out/PROVENANCE.txt
+
+      # The kernel is built from APSL sources and open-source runtimes only; no
+      # SDK headers or build tree are published.
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        if: always()
+        with:
+          name: g54-xnu-kernel
+          path: out/
+          if-no-files-found: warn
