@@ -50,6 +50,21 @@ direct kernels.
 
 ## Next concrete steps (12 November 2026 UTC, after E14)
 
+**Connected resume (12 November UTC / 13 November Melbourne):** read-only
+Fastboot communication was re-established with the same `cancunf`, XT2343-2,
+5-8-6 firmware, unlocked bootloader, slot A and `snapshot-update-status=none`
+(`facts/20261112T173138Z-fastboot`, private). No new on-phone execution or
+partition writes yet. The stock restore image and K2 hashes were rechecked;
+the pinned topaz tools and an iOS-root boot image are staged locally.
+Host preparation caught and fixed the macOS builder's nonexistent-output
+`realpath` failure, rsync-version SIGPIPE under `pipefail`, Bash 3.2 empty-array
+errors and root-owned output permissions. It also fixed `--d22ap`: changing
+upstream's constant did not override its import-time default argument, so the
+generated tree silently lacked `/product`. The rebuilt tree now matches all
+61 supplied D22AP product properties. The full privileged root build and
+first iOS-root boot remain pending; the owner must run the sudo command below
+in their Terminal.
+
 **Phone state at handover:** unlocked, 5-8-6, slot A, `boot_a` = the E14 XNU
 image (Android won't boot until the stock `boot.img` is flashed back);
 `userdata` still holds Android data. Latest kernel: K2 = 0200+0201, CI run

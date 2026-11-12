@@ -68,14 +68,24 @@ def load_topaz(topaz):
 
 
 def build_adt(adt, mkadt, ncpu, ufs=False, d22ap=None):
-    if d22ap:
-        mkadt.D22AP_ADT = d22ap   # /product of the real iPhone X tree (Apple material: keep in out/)
     mkadt.HIGH_PHYS_BASE, mkadt.HIGH_MEM_SIZE = G54["PHYS_BASE"], G54["MEM_SIZE"]
     for k in ("GICD", "GICD_SIZE", "GICR", "GICR_SIZE", "FB", "FB_SIZE", "FB_W", "FB_H",
               "FB_STRIDE", "TIMEBASE", "VTIMER_INTID", "UFS", "UFS_SIZE"):
         setattr(mkadt, k, G54[k])
     seed = hashlib.sha512(b"g54 adt seed").digest()  # reproducible images
-    root = mkadt.build(seed=seed, highmem=True)
+    # Upstream binds D22AP_ADT as a default argument at import time; changing
+    # that constant does not change d22ap_product(). Supply the explicit tree
+    # through a scoped adapter, leaving the pinned upstream checkout untouched.
+    product_loader = mkadt.d22ap_product
+    if d22ap:
+        product_props = product_loader(d22ap)
+        if not product_props:
+            raise SystemExit(f"{d22ap}: no /product properties")
+        mkadt.d22ap_product = lambda: product_props
+    try:
+        root = mkadt.build(seed=seed, highmem=True)
+    finally:
+        mkadt.d22ap_product = product_loader
 
     def name(n):
         return dict((k, v) for k, f, v in n.props).get("name", b"").rstrip(b"\0").decode()
