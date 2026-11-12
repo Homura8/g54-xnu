@@ -398,7 +398,7 @@ def collect_fastboot(out: Path) -> dict:
     # Never persist unparsed fastboot lines: they may contain device identifiers or unlock data.
     # The parsed key/value view still preserves every recognized variable for boot analysis.
     (out / "getvar-all.txt").write_text(
-        "".join(f"{key}: {value}\\n" for key, value in redacted.items()))
+        "".join(f"{key}: {value}\n" for key, value in redacted.items()))
     keys = ("product", "variant", "unlocked", "securestate", "is-userspace", "current-slot", "slot-count",
             "max-download-size", "version-bootloader", "hw-revision", "partition-size:boot_a",
             "partition-size:vendor_boot_a", "partition-size:init_boot_a", "partition-size:lk_a")
