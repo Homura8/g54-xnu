@@ -10,3 +10,4 @@ sort after ruby's `0195`. The build driver skips patches that do not apply, so
 | Patch | Purpose | Evidence |
 | --- | --- | --- |
 | `0200-g54-early-framebuffer` | stage-0 band, early console, V=P block on the G54 LK scanout buffer `0xfeac6000`, pitch 4320 | `docs/experiments/2026-11-12-e3-e4-handoff-screen.md` |
+| `0201-g54-panic-reset` | `g54panicreset=<s>`: after a panic, keep it on screen `<s>` seconds, then PSCI reset (the loader set reboot-mode 3, so the phone returns to Fastboot) | `docs/experiments/2026-11-12-e2-psci-reset.md` |

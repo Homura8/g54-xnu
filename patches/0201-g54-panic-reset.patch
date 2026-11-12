@@ -1,0 +1,36 @@
+G54: optional reset to Fastboot after a panic (g54panicreset=<seconds>).
+
+The g54-xnu loader sets the MT6855 watchdog reboot-mode to "bootloader"
+before entering XNU (see g54-xnu docs/experiments E2: PSCI SYSTEM_RESET
+with reboot-mode 3 enters Fastboot). With this boot-arg the panic stays on
+screen for the given time, then the phone returns to Fastboot by itself, so
+experiments do not need a key press. Default: unchanged (spin forever).
+
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 437adb1..9adb09c 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1158,6 +1158,23 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ void
+ panic_spin_forever(void)
+ {
++#if defined(SWEET)
++	/*
++	 * G54: hand the phone back for the next experiment. The g54-xnu loader
++	 * sets the MT6855 watchdog reboot-mode to "bootloader" before entering
++	 * XNU, so a PSCI SYSTEM_RESET lands in Fastboot. g54panicreset=<seconds>
++	 * keeps the panic on screen that long first; 0 or absent = spin forever.
++	 */
++	uint32_t g54_secs = 0;
++	if (PE_parse_boot_argn("g54panicreset", &g54_secs, sizeof(g54_secs)) && g54_secs) {
++		uint64_t g54_end = ml_get_timebase() +
++		    (uint64_t)g54_secs * gPEClockFrequencyInfo.timebase_frequency_hz;
++		while (ml_get_timebase() < g54_end) {
++		}
++		register uint64_t x0 __asm__("x0") = 0x84000009ULL;   /* PSCI SYSTEM_RESET */
++		__asm__ volatile ("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
++	}
++#endif
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */

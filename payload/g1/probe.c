@@ -528,6 +528,7 @@ static void dump_engines(void)
 
 
 
+#ifdef UFS_FIX
 /* ---- UFS link (E8): diagnose and wake the link LK leaves behind ---- */
 /*
  * UFSHCI 2.x registers (JEDEC JESD223) at the stock DTB ufshci@112b0000.
@@ -606,32 +607,105 @@ static int ufs_peer_ok(void)
     return ufs_uic(0x03, 0x1571U << 16, &v) == 0;
 }
 
+/*
+ * E10: MediaTek gates the UFS device reference clock through
+ * REG_UFS_REFCLK_CTRL (0x144): bit 0 = request, bit 1 = ack (Linux
+ * ufs-mediatek.c ufs_mtk_setup_ref_clk waits for ack == request). Without
+ * the clock the device PHY cannot train, which matches E9 (peer RC 8,
+ * DME_LINKSTARTUP RC 1).
+ */
+#define U_XOUFS     0x140
+#define U_REFCLK    0x144
+
+static void ufs_vendor_line(void)
+{
+    puts_("    MTK ", GREEN);
+    kv("XO", r32(UFS + U_XOUFS), 8);
+    kv("REFCLK", r32(UFS + U_REFCLK), 8);
+    kv("IPVER", r32(UFS + 0x2240), 8);
+    puts_("\n", WHITE);
+}
+
+static int ufs_linkstartup(void)
+{
+    for (int i = 0; i < 3; i++) {
+        w32(UFS + U_IS, IS_ULSS);
+        u32 rc = ufs_uic(0x16, 0, 0);              /* DME_LINKSTARTUP */
+        u64 end = ticks() + freq() / 2;
+        while (!(r32(UFS + U_HCS) & 1) && ticks() < end)
+            ;
+        puts_("    LINKSTARTUP ", GREEN);
+        kv("RC", rc, 2);
+        kv("IS", r32(UFS + U_IS), 8);
+        puts_("\n", WHITE);
+        w32(UFS + U_IS, r32(UFS + U_IS));
+        if (rc == 0 && ufs_peer_ok())
+            return 1;
+    }
+    return 0;
+}
+
+/*
+ * E11: Linux drivers/ufs/host/ufs-mediatek.c ufs_mtk_device_reset():
+ * MTK_SIP_UFS_CONTROL (MTK_SIP_SMC_CMD(0x276) = SMC64 fast SiP 0xc2000276),
+ * cmd UFS_MTK_SIP_DEVICE_RESET (BIT(1)); RST_n low, >= 10 us, high, 10 ms.
+ */
+static u64 mtk_ufs_smc(u64 cmd, u64 val)
+{
+    register u64 x0 __asm__("x0") = 0xc2000276UL;
+    register u64 x1 __asm__("x1") = cmd;
+    register u64 x2 __asm__("x2") = val;
+    register u64 x3 __asm__("x3") = 0;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)::"x4", "x5", "x6", "x7",
+                     "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+    return x0;
+}
+
+static void ufs_device_reset(void)
+{
+    u64 lo = mtk_ufs_smc(2, 0);
+    u64 end = ticks() + freq() / 10000 + 1;    /* >= 100 us */
+    while (ticks() < end)
+        ;
+    u64 hi = mtk_ufs_smc(2, 1);
+    end = ticks() + freq() / 50;               /* 20 ms */
+    while (ticks() < end)
+        ;
+    puts_("    DEVRESET ", GREEN);
+    kv("LO", lo, 8);
+    kv("HI", hi, 8);
+    puts_("\n", WHITE);
+}
+
 static void ufs_diag_fix(void)
 {
     puts_("UFS ", GREEN);
     kv("HCE", r32(UFS + U_HCE), 8);
     kv("HCS", r32(UFS + U_HCS), 8);
     kv("IS", r32(UFS + U_IS), 8);
-    puts_("\n    ", WHITE);
-    kv("UECPA", r32(UFS + U_UECPA), 8);
-    kv("UECDL", r32(UFS + U_UECDL), 8);
     puts_("\n", WHITE);
+    ufs_vendor_line();
     ufs_link_line("    BEFORE ");
-    for (int i = 0; i < 3 && !ufs_peer_ok(); i++) {
-        w32(UFS + U_IS, IS_ULSS);
-        u32 rc = ufs_uic(0x16, 0, 0);              /* DME_LINKSTARTUP */
-        u64 end = ticks() + freq() / 2;
-        while (!(r32(UFS + U_HCS) & 1) && ticks() < end)  /* HCS.DP */
+    if (ufs_peer_ok())
+        return;
+    if ((r32(UFS + U_REFCLK) & 1) == 0) {
+        w32(UFS + U_REFCLK, 1);                    /* request the reference clock */
+        u64 end = ticks() + freq() / 100;          /* 10 ms; Linux allows 3 ms */
+        while (((r32(UFS + U_REFCLK) >> 1) & 1) != 1 && ticks() < end)
             ;
-        puts_("    LINKSTARTUP ", GREEN);
-        kv("RC", rc, 2);
-        kv("HCS", r32(UFS + U_HCS), 8);
-        kv("IS", r32(UFS + U_IS), 8);
+        puts_("    REFCLK ON ", GREEN);
+        kv("NOW", r32(UFS + U_REFCLK), 8);
         puts_("\n", WHITE);
-        w32(UFS + U_IS, r32(UFS + U_IS));          /* the polled driver expects IS clear */
+        wait_s(1);
+    }
+    if (!ufs_linkstartup()) {
+        ufs_device_reset();
+        ufs_linkstartup();
     }
     ufs_link_line("    AFTER  ");
 }
+
+#endif /* UFS_FIX */
 
 /* ---- XNU loader (SWEETXNU payload, topaz tools/mkpayload.py format) ---- */
 /*
@@ -739,6 +813,9 @@ static const char *load_xnu(u64 pl)
     /* XNU has no watchdog driver this early: stop LK's (key 0x22000000,
      * enable bit clear), as ruby's shim does. A hang then stays on screen. */
     w32(WDT_BASE + WDT_MODE, 0x22000000U | (r32(WDT_BASE + WDT_MODE) & 0x7eU));
+    /* Any PSCI SYSTEM_RESET from XNU (patch 0201 g54panicreset) now lands in
+     * Fastboot (E2). */
+    w32(WDT_BASE + WDT_NONRST2, (r32(WDT_BASE + WDT_NONRST2) & ~RB_MODE_MASK) | RB_MODE_BOOTLOADER);
     __asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
     register u64 x0 __asm__("x0") = ba;
     register u64 x1 __asm__("x1") = entry_va + off;
