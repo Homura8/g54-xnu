@@ -6,7 +6,8 @@
 | --- | --- | --- |
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
-| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **step 1 done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK accepts our `boot_a` image and the probe paints the panel; [E2](experiments/2026-11-12-e2-psci-reset.md) the probe returns the phone to Fastboot unattended. Next: the shim and XNU stage-0 band |
+| **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
+| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | next |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -47,22 +48,24 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## Next concrete steps (12 November 2026 UTC, after the 5-8-6 OTA)
+## Next concrete steps (12 November 2026 UTC, after E5)
 
-1. **Use the automatic loop** in [hardware-loop.md §3a](hardware-loop.md):
-   flash `boot_a`, `fastboot reboot`, poll for Fastboot. The owner allows
-   revertible flashing without restoring between tests (AGENTS.md). The
-   phone currently holds the E2 probe in `boot_a`. Restore stock before
-   handing the phone back for Android use.
-2. **G2, XNU stage-0 band on the G54.** Reuse the pinned ios-topaz `shim/`,
-   `tools/mkadt.py` and `tools/mkpayload.py` (ruby's lineage; source at
-   `BASE_SHA`). G54 deltas: MT6855 GIC/timer/CPU map in the ADT (the A55
-   cores `cpu@000`–`cpu@005`, as ruby uses only A55), LK framebuffer from
-   `/chosen atag,videolfb-*`, watchdog `0x1c007000`. Pack shim+payload with
-   `scripts/g54_payload.py`; the stock gzip stream is 19,694,685 bytes (raw
-   46,925,524). Reuse the K0 kernel; no XNU rebuild is needed for G2.
-3. Then storage (UFS LUN/partition for the iOS root), then launchd, then
-   SpringBoard, following ruby's ladder; change one subsystem per image.
+1. **Build and flash an XNU image** (no RAM boot):
+   `python3 scripts/g54_payload.py build`, then
+   `python3 scripts/g54_xnu_image.py --topaz <ios-topaz at BASE_SHA> --kernel
+   <kernel.development.sweet from kernel.yml> --stock <5-8-6 boot.img> --out
+   out/g2/g54-xnu-boot.img`, then `fastboot flash boot_a …` and `fastboot
+   reboot`. Once XNU runs, getting back to Fastboot needs Power + Volume Down
+   (the loader stops LK's watchdog).
+2. **M4 storage:** add `/sweet-ufs` (MT6855 `ufshci@112b0000`, not ruby's
+   `0x11270000`) and probe read-only (no `ufsrw`/`rootrw`). Find the userdata
+   LUN and GPT (Android: `sdc` = LUN 2, `boot_b` = `sdc65`).
+3. **Root:** follow ruby's `docs/en/root-recipe.md` (HFS+ iOS 16.7.16 root from
+   the owner's iPhone10,3 IPSW). The likely route is a root image in
+   `userdata`, which is revertible with `fastboot -w`. Then launchd, then
+   SpringBoard (ruby's ICL NOP, display, input).
+4. Secondary CPUs (`cpus=6`), then MediaTek drivers (keys, touch, battery)
+   one at a time, each gated by its boot-arg.
 
 ### Safety notes learned this session
 

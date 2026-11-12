@@ -28,6 +28,7 @@ verified Motorola package. Supersedes the 5-8-3 table below where they differ.
 | Return to Fastboot from our code | reboot-mode 3 + PSCI `SYSTEM_RESET` → `reason: preloader set fastboot mode`; reboot-mode 3 + watchdog `SWRST` → normal boot | [E2](experiments/2026-11-12-e2-psci-reset.md), E1 |
 | Manual Fastboot | Power + Volume Down → `reason: Volume down key pressed` | E1 |
 | Exception level at kernel entry | **EL1** (not EL2) | E2 on-screen diagnostic |
+| XNU on the G54 | ruby's kernel + `0200-g54-early-framebuffer` boots to IOKit: `RUBY GIC: ready gicd=1`, SGI1 OK on cpu0 (MPIDR Aff 0), AppleCLCD at `0xfeac6000` stride 4320 | [E5](experiments/2026-11-12-e5-xnu-first-boot.md) |
 | Watchdog at kernel entry | enabled (`WDT_MODE` bit 0 = 1); feed it at `0x1c007008` with `0x1971` | E2 |
 
 **Matching restore images:** the package
