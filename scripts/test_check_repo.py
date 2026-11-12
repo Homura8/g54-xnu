@@ -11,7 +11,8 @@ class CheckRepoTests(unittest.TestCase):
         self.values = env(ROOT / "config/kernel.env")
 
     def test_repository_pins_are_valid(self):
-        self.assertEqual(check_pins(self.values, []), [])
+        patches = sorted((ROOT / "patches").glob("*.patch"))
+        self.assertEqual(check_pins(self.values, patches), [])
 
     def test_moving_or_malformed_pins_are_rejected(self):
         for key, value in (("RUBY_SHA", "main"), ("DXB_SHA", "abc"), ("RUBY_PATCHSET_SHA256", "0" * 63),
