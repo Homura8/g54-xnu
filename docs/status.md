@@ -23,6 +23,30 @@ iPadOS 17 route would first need a G54 UEFI port; no MediaTek UniXNU port has
 reached a home screen. UniXNU stays the fallback if the G54's LK refuses
 direct kernels.
 
+## M1 offline preflight (2026-11-12; **not a G54 hardware test**)
+
+- Collector review found that failed Fastboot `getvar all` commands and ambiguous
+  device selection could otherwise yield misleading reports. The focused
+  [hardened collector](../scripts/m1_facts.py) now rejects these, checks failed/empty
+  ADB `getprop`, accepts both prefixed and bare `getvar` lines, and writes
+  only parsed/redacted Fastboot variables to disk (not unparsed raw lines).
+- A [read-only first-session runbook](first-session.md) documents the Mac
+  commands, privacy review, and stop points. No phone, kernel or Apple asset
+  was accessed during this work.
+- Motorola confirms the G54 launched with Android 13/Dimensity 7020. The
+  community `cancunf` BoardConfig targets boot header v4, 4 KiB pages and
+  `vendor_boot`; stock header, DTB placement and `init_boot` on this unit
+  remain **unobserved**. Do not infer phone-specific values from that tree.
+- **Potential M3 blocker:** a G54-specific report says `fastboot boot` is not
+  implemented. RAM-only boot is unverified; do not plan any writable alternative
+  without a matching stock recovery path and separate owner approval.
+- The manufacturer Software Fix recovery flow requires a Windows PC and can
+  erase personal data; do not assume a Mac-only restore route.
+- No general Celestia Nexus change is required: these are G54-specific
+  preflight constraints. **After** this offline work, the owner successfully
+  collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
+  verification remain outstanding. See the checkpoint below.
+
 ## Next concrete steps (13 November 2026)
 
 1. **Use the connected phone**, if present, under [the agent-led hardware
