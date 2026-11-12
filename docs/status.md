@@ -7,7 +7,7 @@
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
-| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **UFS done 2026-11-12** ([E6–E14](experiments/2026-11-12-e6-e8-ufs.md)): LK leaves the device in reset; the probe's vendor-order reset + `fDeviceInit` lets XNU find `userdata` (LUN 2, 114,359 MiB) and try `ufsroot0`. Root image not flashed yet |
+| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **UFS done 2026-11-12** ([E6–E14](experiments/2026-11-12-e6-e8-ufs.md)). **[E15](experiments/2026-11-12-e15-ios-root.md):** iOS 16.7.16 HFS+ root built, checked and flashed to `userdata`; first boot issued at 17:58:35 UTC. Root mounting and launchd still await on-screen evidence |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -53,26 +53,33 @@ direct kernels.
 **Connected resume (12 November UTC / 13 November Melbourne):** read-only
 Fastboot communication was re-established with the same `cancunf`, XT2343-2,
 5-8-6 firmware, unlocked bootloader, slot A and `snapshot-update-status=none`
-(`facts/20261112T173138Z-fastboot`, private). No new on-phone execution or
-partition writes yet. The stock restore image and K2 hashes were rechecked;
+(`facts/20261112T173138Z-fastboot`, private). The stock restore image and K2 hashes were rechecked;
 the pinned topaz tools and an iOS-root boot image are staged locally.
 Host preparation caught and fixed the macOS builder's nonexistent-output
 `realpath` failure, rsync-version SIGPIPE under `pipefail`, Bash 3.2 empty-array
 errors and root-owned output permissions. It also fixed `--d22ap`: changing
 upstream's constant did not override its import-time default argument, so the
 generated tree silently lacked `/product`. The rebuilt tree now matches all
-61 supplied D22AP product properties. The full privileged root build and
-first iOS-root boot remain pending; the owner must run the sudo command below
-in their Terminal. The first privileged attempt reached HFS+ formatting but
+61 supplied D22AP product properties. The first privileged attempt reached HFS+ formatting but
 failed at `diskutil enableOwnership` on a manual mount; cleanup left that
 output mounted. The builder now reattaches the formatted raw image with
 `hdiutil -owners on` and explicitly unmounts it during cleanup. A disposable
 32 MiB raw HFS+ test of that attach method reported
-`GlobalPermissionsEnabled=true`; the full copy is still unverified.
+`GlobalPermissionsEnabled=true`. The owner's full build then completed:
+16 GiB raw volume, about 11 GiB used, both fsck passes OK. Read-only checks
+confirmed iOS 16.7.16 / 20H392, arm64 root:wheel 0755 launchd/dyld, 44 matching
+shared-cache hardlinks, launchd tweaks and the SpringBoard executable.
+Raw root SHA-256: `c549420151e9ad4e342619b9c97dd91340def600f0eb4bf8d8b08442188b6b95`.
+Direct raw flashing stopped on the host with `Failed reading from userdata`
+before any transfer; convert with upstream `img2simg` first (see below).
+The verified sparse root was subsequently flashed successfully (45 chunks,
+383.684 seconds), then the prepared boot image was flashed to `boot_a`.
+The first iOS-root test was rebooted at 17:58:35 UTC; on-screen results
+remain pending. See [E15](experiments/2026-11-12-e15-ios-root.md).
 
-**Phone state at handover:** unlocked, 5-8-6, slot A, `boot_a` = the E14 XNU
-image (Android won't boot until the stock `boot.img` is flashed back);
-`userdata` still holds Android data. Latest kernel: K2 = 0200+0201, CI run
+**Current phone state:** unlocked, 5-8-6, slot A, `boot_a` = the E15 XNU
+image; `userdata` holds the iOS root. Android restoration requires stock
+`boot.img` and a userdata reset. Latest kernel: K2 = 0200+0201, CI run
 43265320296. Rebuild every input with `docs/hardware-loop.md` §3b. The decoded
 D22AP tree is made by extracting `Firmware/all_flash/DeviceTree.d22ap.im4p`
 from the IPSW and LZFSE-decoding its IM4P payload (macOS `libcompression`,
@@ -81,9 +88,14 @@ algorithm 0x801) into `out/ipsw/d22ap.adt`.
 1. **Build the iOS root** on the Mac (needs sudo; ~20 GB free):
    `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
    (ask the owner to run it: it needs their sudo password)
-   (macOS port of topaz `mkiosroot.sh`; untested yet). The decoded D22AP
+   (macOS port of topaz `mkiosroot.sh`; full host build now verified). The decoded D22AP
    tree for `/product` is `out/ipsw/d22ap.adt` (pass `--d22ap`).
-2. **Flash it:** `fastboot flash userdata out/root/ios16-root.img`. This erases
+2. **Convert to Android sparse and flash it:** use upstream
+   `anestisb/android-simg2img` at
+   `a6fcc0f1c61b2aa5b55516829cd7d13dbfbacb91` (`make img2simg simg2img`),
+   then `img2simg out/root/ios16-root.img out/root/ios16-root.simg`.
+   Validate a `simg2img` round trip against the raw image before
+   `fastboot flash userdata out/root/ios16-root.simg`. This erases
    Android userdata; it is revertible with `fastboot -w` plus the stock boot.img.
 3. **Boot:** build with `--probe out/g1-ufs` (`-D UFS_FIX`), `--ufs --d22ap
    out/ipsw/d22ap.adt`, kernel K2 (CI run 43265320296), cmdline as topaz:
