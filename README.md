@@ -25,8 +25,27 @@ committed.
 ## Status
 
 See [docs/status.md](docs/status.md). In short: line **K0**, which builds
-ruby's kernel unchanged in CI to prove the pipeline, is in place. Device facts
-(M1) and the first observable execution on the phone (M3) have not started.
+ruby's kernel unchanged in CI to prove the pipeline, is in place. Device facts (M1) have been collected from the actual G54; firmware/recovery
+analysis and the first observable execution (M3) remain pending.
+
+## Connected-device bring-up (G54 owner / local coding agent)
+
+**Current focus:** the real device has an unlocked bootloader and captured
+ADB/Fastboot M1 facts. The fastest route to **iOS 16.7.16 SpringBoard** is the
+iterative [hardware experiment loop](docs/hardware-loop.md), not another
+framework milestone. Read its firmware/OTA and recovery prerequisites
+**before issuing any boot or write operation**.
+
+The Mac may have direct ADB/Fastboot access to the phone. Agents should
+check for it, use host-side verification, and iteratively test only within
+the owner's current approved risk scope. Bootloader acceptance, XNU entry,
+PID 1 and SpringBoard are separate evidence gates; none has yet been
+observed on this G54.
+
+The baseline [K0 build](docs/build.md) is already reproducible; see
+[observed M1 facts](docs/device-facts.md) and the
+[run card template](docs/experiments/TEMPLATE.md). This project keeps
+G54-specific boot work separate from Celestia Nexus.
 
 ## Build the kernel
 
