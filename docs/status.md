@@ -7,7 +7,7 @@
 | **M2** toolchain: reproducible kernel pipeline (line K0) | no | **done**: CI run [43207707172](https://github.com/Homura8/g54-xnu/actions/runs/43207707172) reproduced ruby's kernel code and data (exec-data `6b22fc25…`) without any KDK, in 10 minutes |
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
-| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | next |
+| **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **UFS done 2026-11-12** ([E6–E14](experiments/2026-11-12-e6-e8-ufs.md)): LK leaves the device in reset; the probe's vendor-order reset + `fDeviceInit` lets XNU find `userdata` (LUN 2, 114,359 MiB) and try `ufsroot0`. Root image not flashed yet |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -48,24 +48,21 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## Next concrete steps (12 November 2026 UTC, after E5)
+## Next concrete steps (12 November 2026 UTC, after E14)
 
-1. **Build and flash an XNU image** (no RAM boot):
-   `python3 scripts/g54_payload.py build`, then
-   `python3 scripts/g54_xnu_image.py --topaz <ios-topaz at BASE_SHA> --kernel
-   <kernel.development.sweet from kernel.yml> --stock <5-8-6 boot.img> --out
-   out/g2/g54-xnu-boot.img`, then `fastboot flash boot_a …` and `fastboot
-   reboot`. Once XNU runs, getting back to Fastboot needs Power + Volume Down
-   (the loader stops LK's watchdog).
-2. **M4 storage:** add `/sweet-ufs` (MT6855 `ufshci@112b0000`, not ruby's
-   `0x11270000`) and probe read-only (no `ufsrw`/`rootrw`). Find the userdata
-   LUN and GPT (Android: `sdc` = LUN 2, `boot_b` = `sdc65`).
-3. **Root:** follow ruby's `docs/en/root-recipe.md` (HFS+ iOS 16.7.16 root from
-   the owner's iPhone10,3 IPSW). The likely route is a root image in
-   `userdata`, which is revertible with `fastboot -w`. Then launchd, then
-   SpringBoard (ruby's ICL NOP, display, input).
-4. Secondary CPUs (`cpus=6`), then MediaTek drivers (keys, touch, battery)
-   one at a time, each gated by its boot-arg.
+1. **Build the iOS root** on the Mac (needs sudo; ~20 GB free):
+   `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw <ios-topaz at BASE_SHA> out/root/ios16-root.img 16g`
+   (macOS port of topaz `mkiosroot.sh`; untested yet). The decoded D22AP
+   tree for `/product` is `out/ipsw/d22ap.adt` (pass `--d22ap`).
+2. **Flash it:** `fastboot flash userdata out/root/ios16-root.img`. This erases
+   Android userdata; it is revertible with `fastboot -w` plus the stock boot.img.
+3. **Boot:** build with `--probe out/g1-ufs` (`-D UFS_FIX`), `--ufs --d22ap
+   out/ipsw/d22ap.adt`, kernel K2 (CI run 43265320296), cmdline as topaz:
+   `debug=0xc serial=3 cpus=1 keepsyms=1 -noprogress rd=ufsroot0
+   ufsrw=1 rootrw=1 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1
+   ignition_level=1 wdt=-1 wdt_test=no_user_checkin g54panicreset=45`.
+   Expect slow I/O (PWM link) and then launchd.
+4. Then: UFS HS gear, `cpus=6`, USB log channel (ruby `ruby_usb`), input.
 
 ### Safety notes learned this session
 
