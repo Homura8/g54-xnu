@@ -527,6 +527,112 @@ static void dump_engines(void)
 }
 
 
+
+/* ---- UFS link (E8): diagnose and wake the link LK leaves behind ---- */
+/*
+ * UFSHCI 2.x registers (JEDEC JESD223) at the stock DTB ufshci@112b0000.
+ * MediaTek link state: Linux drivers/ufs/host/ufs-mediatek.c
+ * ufs_mtk_wait_link_state(): REG_UFS_DEBUG_SEL (0x22c0) = 0x20, then
+ * REG_UFS_PROBE (0x22c8) >> 28 (VS_LINK_UP 2, VS_LINK_HIBERN8 3).
+ * E7: XNU's polled driver got OCS 5 (UIC communication failure) on its first
+ * TEST UNIT READY. Only the link power state is changed here; no data access.
+ */
+#define UFS         0x112b0000UL
+#define U_AHIT      0x18
+#define U_IS        0x20
+#define U_HCS       0x30
+#define U_HCE       0x34
+#define U_UECPA     0x38
+#define U_UECDL     0x3c
+#define U_UECDME    0x48
+#define U_UICCMD    0x90
+#define U_ARG1      0x94
+#define U_ARG2      0x98
+#define U_ARG3      0x9c
+#define IS_UHXS     (1U << 5)
+#define IS_UCCS     (1U << 10)
+#define HCS_UCRDY   (1U << 3)
+
+static u32 ufs_link_state(void)
+{
+    w32(UFS + 0x22c0, 0x20);
+    __asm__ volatile("dsb sy" ::: "memory");
+    return r32(UFS + 0x22c8) >> 28;
+}
+
+/* Returns the UIC result code (ARG2 low byte), or 0xff on timeout. */
+static u32 ufs_uic(u32 cmd, u32 arg1, u32 *val)
+{
+    u64 end = ticks() + freq() / 2;
+    while (!(r32(UFS + U_HCS) & HCS_UCRDY))
+        if (ticks() > end)
+            return 0xfe;
+    w32(UFS + U_IS, IS_UCCS);
+    w32(UFS + U_ARG1, arg1);
+    w32(UFS + U_ARG2, 0);
+    w32(UFS + U_ARG3, 0);
+    w32(UFS + U_UICCMD, cmd);
+    end = ticks() + freq() / 2;
+    while (!(r32(UFS + U_IS) & IS_UCCS))
+        if (ticks() > end)
+            return 0xff;
+    w32(UFS + U_IS, IS_UCCS);
+    if (val)
+        *val = r32(UFS + U_ARG3);
+    return r32(UFS + U_ARG2) & 0xff;
+}
+
+#define IS_ULSS     (1U << 8)
+
+static void ufs_link_line(const char *tag)
+{
+    u32 tx = 0, rx = 0, peer = 0;
+    u32 rtx = ufs_uic(0x01, 0x1561U << 16, &tx);   /* DME_GET PA_CONNECTEDTXDATALANES */
+    u32 rrx = ufs_uic(0x01, 0x1581U << 16, &rx);   /* DME_GET PA_CONNECTEDRXDATALANES */
+    u32 rp = ufs_uic(0x03, 0x1571U << 16, &peer);  /* DME_PEER_GET PA_PWRMODE */
+    puts_(tag, GREEN);
+    kv("TX", rtx ? 0xee : tx, 2);
+    kv("RX", rrx ? 0xee : rx, 2);
+    kv("PEER", peer, 2);
+    kv("RC", rp, 2);
+    kv("LINK", ufs_link_state(), 1);
+    puts_("\n", WHITE);
+}
+
+/* Returns nonzero if the UFS device answers over the link. */
+static int ufs_peer_ok(void)
+{
+    u32 v = 0;
+    return ufs_uic(0x03, 0x1571U << 16, &v) == 0;
+}
+
+static void ufs_diag_fix(void)
+{
+    puts_("UFS ", GREEN);
+    kv("HCE", r32(UFS + U_HCE), 8);
+    kv("HCS", r32(UFS + U_HCS), 8);
+    kv("IS", r32(UFS + U_IS), 8);
+    puts_("\n    ", WHITE);
+    kv("UECPA", r32(UFS + U_UECPA), 8);
+    kv("UECDL", r32(UFS + U_UECDL), 8);
+    puts_("\n", WHITE);
+    ufs_link_line("    BEFORE ");
+    for (int i = 0; i < 3 && !ufs_peer_ok(); i++) {
+        w32(UFS + U_IS, IS_ULSS);
+        u32 rc = ufs_uic(0x16, 0, 0);              /* DME_LINKSTARTUP */
+        u64 end = ticks() + freq() / 2;
+        while (!(r32(UFS + U_HCS) & 1) && ticks() < end)  /* HCS.DP */
+            ;
+        puts_("    LINKSTARTUP ", GREEN);
+        kv("RC", rc, 2);
+        kv("HCS", r32(UFS + U_HCS), 8);
+        kv("IS", r32(UFS + U_IS), 8);
+        puts_("\n", WHITE);
+        w32(UFS + U_IS, r32(UFS + U_IS));          /* the polled driver expects IS clear */
+    }
+    ufs_link_line("    AFTER  ");
+}
+
 /* ---- XNU loader (SWEETXNU payload, topaz tools/mkpayload.py format) ---- */
 /*
  * Layout (from mkpayload.py at the pinned ios-topaz BASE_SHA): "SWEETXNU",
@@ -691,6 +797,9 @@ void probe_main(u64 dtb, u64 pc)
     }
 
     u64 pl = find_payload((u64)_end);
+#ifdef UFS_FIX
+    ufs_diag_fix();
+#endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);
         hex(pl, 9, WHITE);

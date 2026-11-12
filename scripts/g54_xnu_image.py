@@ -13,7 +13,8 @@ docs/device-facts.md and docs/experiments/), then the tree is adjusted:
 
   * six Cortex-A55 CPUs, MPIDR Aff1 = 0..5 (live DTB cpu@000..005 reg
     0x000..0x500; boot CPU reads MPIDR 0x81000000, E4),
-  * no sweet-ufs node yet: the first XNU runs never touch storage.
+  * /sweet-ufs only with --ufs (MT6855 ufshci@112b0000; read-only unless
+    the cmdline has ufsrw=1).
 
 The resulting payload is appended after the probe (payload/g1) at its
 `_end`; the probe's loader finds it, copies the kernel to phys_base and
@@ -40,6 +41,7 @@ G54 = dict(
     FB_W=1080, FB_H=2400, FB_STRIDE=4320,
     TIMEBASE=13000000,                      # CNTFRQ 0xc65d40 (E4)
     VTIMER_INTID=27,                        # DT timer PPI 11
+    UFS=0x112b0000, UFS_SIZE=0x4000,        # stock DTB ufshci@112b0000 (reg size 0x2300)
 )
 DEFAULT_CMDLINE = "debug=0xc serial=3 cpus={cpus} keepsyms=1 -noprogress wdt=-1"
 
@@ -65,10 +67,12 @@ def load_topaz(topaz):
     return adt, mkadt, mkpayload
 
 
-def build_adt(adt, mkadt, ncpu):
+def build_adt(adt, mkadt, ncpu, ufs=False, d22ap=None):
+    if d22ap:
+        mkadt.D22AP_ADT = d22ap   # /product of the real iPhone X tree (Apple material: keep in out/)
     mkadt.HIGH_PHYS_BASE, mkadt.HIGH_MEM_SIZE = G54["PHYS_BASE"], G54["MEM_SIZE"]
     for k in ("GICD", "GICD_SIZE", "GICR", "GICR_SIZE", "FB", "FB_SIZE", "FB_W", "FB_H",
-              "FB_STRIDE", "TIMEBASE", "VTIMER_INTID"):
+              "FB_STRIDE", "TIMEBASE", "VTIMER_INTID", "UFS", "UFS_SIZE"):
         setattr(mkadt, k, G54[k])
     seed = hashlib.sha512(b"g54 adt seed").digest()  # reproducible images
     root = mkadt.build(seed=seed, highmem=True)
@@ -76,7 +80,8 @@ def build_adt(adt, mkadt, ncpu):
     def name(n):
         return dict((k, v) for k, f, v in n.props).get("name", b"").rstrip(b"\0").decode()
 
-    root.children = [c for c in root.children if name(c) != "sweet-ufs"]
+    if not ufs:
+        root.children = [c for c in root.children if name(c) != "sweet-ufs"]
     cpus = next(c for c in root.children if name(c) == "cpus")
     template = cpus.children[0]
     nodes = []
@@ -115,11 +120,14 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--cpus", type=int, default=1)
     ap.add_argument("--cmdline")
+    ap.add_argument("--d22ap", help="decoded DeviceTree.d22ap (for /product); see docs/status.md")
+    ap.add_argument("--ufs", action="store_true",
+                    help="describe the UFS host (/sweet-ufs); the driver stays read-only without ufsrw=1")
     a = ap.parse_args(argv)
 
     adt, mkadt, mkpayload = load_topaz(a.topaz)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    adt_blob = build_adt(adt, mkadt, 6)
+    adt_blob = build_adt(adt, mkadt, 6, ufs=a.ufs, d22ap=a.d22ap)
     adt_path = a.out + ".adt"
     open(adt_path, "wb").write(adt_blob)
     cmdline = a.cmdline or DEFAULT_CMDLINE.format(cpus=a.cpus)
