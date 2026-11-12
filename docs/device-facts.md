@@ -5,6 +5,27 @@ its source and date. **Status `unknown` means nobody has observed it; do not
 fill it from a spec sheet, a forum post or another phone.** Collect read-only
 facts first; nothing here needs an unlocked bootloader unless marked.
 
+## How to collect (read-only)
+
+`scripts/m1_facts.py` gathers most rows below. It cannot change the phone: every
+command is checked against a read-only allowlist (`getprop`, fixed `/proc` and
+`/sys` reads, partition-name listings, `fastboot getvar all`) before it runs,
+and serial numbers, IMEIs and MAC addresses are replaced by short hashes.
+Results go to `facts/` (never committed; review before sharing).
+
+```sh
+brew install --cask android-platform-tools   # adb + fastboot
+python3 scripts/m1_facts.py adb              # Android running, USB debugging on, prompt accepted
+python3 scripts/m1_facts.py fastboot         # phone in fastboot mode (Power + Volume down)
+python3 scripts/m1_facts.py bootimg boot.img vendor_boot.img init_boot.img   # stock images, offline
+python3 scripts/m1_facts.py dtb some.dtb      # any DTB or blob containing DTBs, offline
+```
+
+Entering fastboot mode and running `getvar` changes nothing on the phone.
+Stock `boot`/`vendor_boot` images come from the exact firmware build the phone
+runs (match `ro.build.fingerprint`); reading them from the phone itself needs
+root and is not part of M1.
+
 | Fact | Value | Source / how to obtain | Status |
 | --- | --- | --- | --- |
 | Exact model number (XT…) and region/carrier | | Settings → About phone; box label | unknown |
