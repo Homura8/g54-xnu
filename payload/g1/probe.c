@@ -646,9 +646,15 @@ static int ufs_linkstartup(void)
 }
 
 /*
- * E11: Linux drivers/ufs/host/ufs-mediatek.c ufs_mtk_device_reset():
- * MTK_SIP_UFS_CONTROL (MTK_SIP_SMC_CMD(0x276) = SMC64 fast SiP 0xc2000276),
- * cmd UFS_MTK_SIP_DEVICE_RESET (BIT(1)); RST_n low, >= 10 us, high, 10 ms.
+ * E13: MediaTek vendor ufs-mediatek.c order (kernel_device_modules-5.15):
+ *   ufs_mtk_device_reset: ufshcd_hba_stop (HCE=0), RST_n low >= 10 us, high,
+ *     10-15 ms; reset via MTK_SIP_UFS_CONTROL 0xc2000276 cmd DEVICE_RESET (2)
+ *     (E11: accepted, ret 0; LK's 0xc200040d is refused from EL1, E12).
+ *   hce enable: HCE=1 (no extra host reset when UniPro was left in LPM).
+ *   ufs_mtk_pre_link: DME_SET VS_UNIPROPOWERDOWNCONTROL(0xd0a8,sel 0)=0,
+ *     PA_LOCAL_TX_LCC_ENABLE(0x155e)=0, VS_SAVEPOWERCONTROL(0xd0a6) bit 6 clear.
+ *   DME_LINKSTARTUP.
+ * No MPHY/VA09 steps: the stock DTB ufshci node has no phys or va09-supply.
  */
 static u64 mtk_ufs_smc(u64 cmd, u64 val)
 {
@@ -661,20 +667,157 @@ static u64 mtk_ufs_smc(u64 cmd, u64 val)
     return x0;
 }
 
-static void ufs_device_reset(void)
+static void delay_us(u64 us)
 {
-    u64 lo = mtk_ufs_smc(2, 0);
-    u64 end = ticks() + freq() / 10000 + 1;    /* >= 100 us */
+    u64 end = ticks() + freq() * us / 1000000 + 1;
     while (ticks() < end)
         ;
-    u64 hi = mtk_ufs_smc(2, 1);
-    end = ticks() + freq() / 50;               /* 20 ms */
-    while (ticks() < end)
-        ;
-    puts_("    DEVRESET ", GREEN);
-    kv("LO", lo, 8);
-    kv("HI", hi, 8);
+}
+
+static u32 dme_set(u32 attr, u32 sel, u32 val)
+{
+    u64 end = ticks() + freq() / 2;
+    while (!(r32(UFS + U_HCS) & HCS_UCRDY))
+        if (ticks() > end)
+            return 0xfe;
+    w32(UFS + U_IS, IS_UCCS);
+    w32(UFS + U_ARG1, (attr << 16) | sel);
+    w32(UFS + U_ARG2, 0);
+    w32(UFS + U_ARG3, val);
+    w32(UFS + U_UICCMD, 0x02);                     /* DME_SET */
+    end = ticks() + freq() / 2;
+    while (!(r32(UFS + U_IS) & IS_UCCS))
+        if (ticks() > end)
+            return 0xff;
+    w32(UFS + U_IS, IS_UCCS);
+    return r32(UFS + U_ARG2) & 0xff;
+}
+
+static int hce_set(u32 on)
+{
+    w32(UFS + U_HCE, on);
+    u64 end = ticks() + freq() / 50;               /* 20 ms */
+    while ((r32(UFS + U_HCE) & 1) != on)
+        if (ticks() > end)
+            return 0;
+    return 1;
+}
+
+
+/*
+ * E14: a freshly reset UFS device answers TEST UNIT READY with CHECK
+ * CONDITION until the host completes device init (JESD220: set flag
+ * fDeviceInit, poll until the device clears it; Linux
+ * ufshcd_complete_dev_init). Minimal polled UTP engine: one transfer
+ * request descriptor + command descriptor in free RAM (E4 free range
+ * 0x50f00000+0x1f100000). Control queries only, no LUN data.
+ */
+#define U_UTRLBA    0x50
+#define U_UTRLBAU   0x54
+#define U_UTRLDBR   0x58
+#define U_UTRLRSR   0x60
+#define UTP_BASE    0x50f00000UL
+#define UTRD        (UTP_BASE)
+#define UCD         (UTP_BASE + 0x400)
+#define UCD_RSP     0x200
+
+static void utp_zero(void)
+{
+    for (u64 a = UTP_BASE; a < UTP_BASE + 0x1000; a += 8)
+        *(volatile u64 *)a = 0;
+}
+
+static void ucd_byte(u32 off, u8 v)
+{
+    u64 a = UCD + off;
+    u32 sh = (a & 3) * 8;
+    u64 w = a & ~3UL;
+    w32(w, (r32(w) & ~(0xffU << sh)) | ((u32)v << sh));
+}
+
+static u8 rsp_byte(u32 off)
+{
+    u64 a = UCD + UCD_RSP + off;
+    return (u8)(r32(a & ~3UL) >> ((a & 3) * 8));
+}
+
+/* Returns OCS (0 = success), 0xfe if the doorbell never cleared. */
+static u32 utp_send(void)
+{
+    w32(UTRD + 0, 1U << 28);                       /* CT = UFS storage, no data */
+    w32(UTRD + 8, 0x0f);                           /* OCS = invalid until done */
+    w32(UTRD + 16, (u32)UCD);
+    w32(UTRD + 20, (u32)(UCD >> 32));
+    w32(UTRD + 24, ((UCD_RSP / 4) << 16) | (0x80));  /* response offset, length (dwords) */
+    w32(UTRD + 28, ((0x300 / 4) << 16) | 0);       /* PRDT offset, no entries */
+    __asm__ volatile("dsb sy" ::: "memory");
+    w32(UFS + U_UTRLRSR, 0);
+    w32(UFS + U_UTRLBA, (u32)UTRD);
+    w32(UFS + U_UTRLBAU, (u32)(UTRD >> 32));
+    w32(UFS + U_UTRLRSR, 1);
+    w32(UFS + U_IS, r32(UFS + U_IS));
+    w32(UFS + U_UTRLDBR, 1);
+    u64 end = ticks() + freq() / 5;
+    while (r32(UFS + U_UTRLDBR) & 1)
+        if (ticks() > end)
+            return 0xfe;
+    __asm__ volatile("dsb sy" ::: "memory");
+    return r32(UTRD + 8) & 0xff;
+}
+
+static void upiu_hdr(u8 type, u8 tag, u8 func)
+{
+    for (u32 i = 0; i < 0x400; i += 4)
+        w32(UCD + i, 0);
+    ucd_byte(0, type);
+    ucd_byte(3, tag);
+    ucd_byte(5, func);
+}
+
+static void ufs_dev_init(void)
+{
+    u32 ocs = 0xff, nop = 0xff;
+    utp_zero();
+    for (int i = 0; i < 10; i++) {                 /* NOP OUT until NOP IN */
+        upiu_hdr(0x00, 1, 0);
+        ocs = utp_send();
+        nop = rsp_byte(0);
+        if (ocs == 0 && nop == 0x20)
+            break;
+        delay_us(10000);
+    }
+    puts_("    NOP ", GREEN);
+    kv("OCS", ocs, 2);
+    kv("RSP", nop, 2);
     puts_("\n", WHITE);
+
+    upiu_hdr(0x16, 2, 0x81);                       /* QUERY, standard write */
+    ucd_byte(12, 0x06);                            /* SET FLAG */
+    ucd_byte(13, 0x01);                            /* fDeviceInit */
+    u32 so = utp_send();
+    u32 st = rsp_byte(0), sr = rsp_byte(6);
+    u32 flag = 0xff, ro = 0xff, polls = 0;
+    u64 end = ticks() + freq() * 2;
+    do {
+        upiu_hdr(0x16, 3, 0x01);                   /* QUERY, standard read */
+        ucd_byte(12, 0x05);                        /* READ FLAG */
+        ucd_byte(13, 0x01);
+        ro = utp_send();
+        flag = rsp_byte(23);               /* utp_upiu_query.value (be32), low byte */
+        polls++;
+        if (ro == 0 && rsp_byte(6) == 0 && flag == 0)
+            break;
+        delay_us(5000);
+    } while (ticks() < end);
+    puts_("    DEVINIT ", GREEN);
+    kv("SET", so, 2);
+    kv("T", st, 2);
+    kv("R", sr, 2);
+    kv("FLAG", flag, 2);
+    kv("N", polls, 2);
+    puts_("\n", WHITE);
+    w32(UFS + U_UTRLRSR, 0);                       /* hand a quiet host to XNU */
+    w32(UFS + U_IS, r32(UFS + U_IS));
 }
 
 static void ufs_diag_fix(void)
@@ -688,7 +831,7 @@ static void ufs_diag_fix(void)
     ufs_link_line("    BEFORE ");
     if (ufs_peer_ok())
         return;
-    if ((r32(UFS + U_REFCLK) & 1) == 0) {
+    if ((r32(UFS + U_REFCLK) & 1) == 0) {  /* E10: already on (3) on the G54 */
         w32(UFS + U_REFCLK, 1);                    /* request the reference clock */
         u64 end = ticks() + freq() / 100;          /* 10 ms; Linux allows 3 ms */
         while (((r32(UFS + U_REFCLK) >> 1) & 1) != 1 && ticks() < end)
@@ -698,11 +841,45 @@ static void ufs_diag_fix(void)
         puts_("\n", WHITE);
         wait_s(1);
     }
-    if (!ufs_linkstartup()) {
-        ufs_device_reset();
-        ufs_linkstartup();
-    }
+    u32 lpm = 0, spc = 0;
+    u32 r1 = ufs_uic(0x01, 0xd0a8U << 16, &lpm);
+    u32 r2 = ufs_uic(0x01, 0xd0a6U << 16, &spc);
+    puts_("    VS ", GREEN);
+    kv("PWRDN", r1 ? 0xee : lpm, 2);
+    kv("SAVEPWR", r2 ? 0xee : spc, 8);
+    puts_("\n", WHITE);
+
+    int stop = hce_set(0);                         /* ufshcd_hba_stop */
+    u64 lo = mtk_ufs_smc(2, 0);
+    delay_us(20);
+    u64 hi = mtk_ufs_smc(2, 1);
+    delay_us(15000);
+    int start = hce_set(1);
+    u64 end = ticks() + freq() / 10;
+    while (!(r32(UFS + U_HCS) & HCS_UCRDY) && ticks() < end)
+        ;
+    puts_("    RESET ", GREEN);
+    kv("STOP", stop, 1);
+    kv("LO", lo, 2);
+    kv("HI", hi, 2);
+    kv("START", start, 1);
+    kv("HCS", r32(UFS + U_HCS), 8);
+    puts_("\n", WHITE);
+
+    u32 a1 = dme_set(0xd0a8, 0, 0);                /* UniPro out of LPM */
+    u32 a2 = dme_set(0x155e, 0, 0);                /* host TX LCC off */
+    u32 a3 = 0xee;
+    if (ufs_uic(0x01, 0xd0a6U << 16, &spc) == 0)
+        a3 = dme_set(0xd0a6, 0, spc & ~(1U << 6));
+    puts_("    PRELINK ", GREEN);
+    kv("LPM", a1, 2);
+    kv("LCC", a2, 2);
+    kv("SAVE", a3, 2);
+    puts_("\n", WHITE);
+    int up = ufs_linkstartup();
     ufs_link_line("    AFTER  ");
+    if (up)
+        ufs_dev_init();
 }
 
 #endif /* UFS_FIX */
