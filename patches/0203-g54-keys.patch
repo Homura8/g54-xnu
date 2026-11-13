@@ -6,7 +6,9 @@ software channel (SWINF 2 at PMIF 0x1c804000 + 0x880, as the stock
 spmi-mtk-pmif.ko selects for MT6855). Offsets from the stock
 mtk-pmic-keys.ko and spmi-mtk-pmif.ko, checked live by the g54-xnu probe
 (E27). A thread polls every 20 ms with a two-sample debounce and reports
-through sweet_hid_key(). The PMIC is only read. Off by default.
+through sweet_hid_key(). It also acknowledges MT6363 interrupts like the
+stock PMIC IRQ handler (status write-back, 0x41b = 1): without that one
+power press cold-resets the phone ~79 s later (E30/E31). Off by default.
 
 diff --git a/bsd/conf/files b/bsd/conf/files
 index f9509b8..ce5d8ee 100644
@@ -22,10 +24,10 @@ index f9509b8..ce5d8ee 100644
  bsd/dev/ruby_keys.c			standard
 diff --git a/bsd/dev/g54_keys.c b/bsd/dev/g54_keys.c
 new file mode 100644
-index 0000000..db208ed
+index 0000000..fadb78f
 --- /dev/null
 +++ b/bsd/dev/g54_keys.c
-@@ -0,0 +1,168 @@
+@@ -0,0 +1,256 @@
 +/*
 + * G54 (Moto G54, MT6855): side keys, polled.
 + *
@@ -38,15 +40,17 @@ index 0000000..db208ed
 + * Register offsets come from the stock mtk-pmic-keys.ko (mt6363_regs) and
 + * spmi-mtk-pmif.ko (mediatek,mt6855-spmi: SWINF n at PMIF+0x800+0x40n) and
 + * were checked live by the g54-xnu probe (docs/experiments E27: TOPSTATUS
-+ * idle 0x1e, all three keys seen). The PMIC is
-+ * only read (SPMI extended-long read commands); nothing is written to it.
++ * idle 0x1e, all three keys seen). The only PMIC writes are the interrupt
++ * acknowledgements the stock PMIC IRQ handler performs (status write-back
++ * and 0x41b = 1, see gk_pmic_ack): without them a power-key press makes the
++ * MT6363 cold-reset the phone ~79 s later (E30, fixed in E31).
 + *
 + * A kernel thread polls every 20 ms, needs two equal samples before a state
 + * change and reports through sweet_hid_key() (0 power, 1 volume up,
 + * 2 volume down). Enabled by boot-arg g54keys=1. Only the AP's PMIF software
 + * channel is used: SWINF 2, as the stock driver selects (regs[25 + 5 *
-+ * soc_chan], soc_chan = 2 for MT6855). SWINF 0 belongs to another master;
-+ * reading through it (probe E27) was followed by spontaneous full resets.
++ * soc_chan], soc_chan = 2 for MT6855). SWINF 0 belongs to another master
++ * (probe E27 read through it and iOS lost touch).
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +
@@ -79,7 +83,7 @@ index 0000000..db208ed
 +	uint32_t ch;
 +	bool down[GK_NKEYS];
 +	bool cand[GK_NKEYS];
-+	uint64_t spmi_err, presses;
++	uint64_t spmi_err, presses, acks;
 +	bool started;
 +} gk;
 +
@@ -119,12 +123,97 @@ index 0000000..db208ed
 +	end = mach_absolute_time() + t;
 +	while (gk_swinf_state(sw) != 6) {
 +		if (mach_absolute_time() > end) {
++			sw[0x24 / 4] = 1;       /* release the channel anyway */
 +			return -2;
 +		}
 +	}
 +	*val = sw[0x14 / 4];
 +	sw[0x24 / 4] = 1;
 +	return 0;
++}
++
++/* One-byte SPMI extended-long write (WDATA +0x04, write bit 29). */
++static int
++gk_spmi_write(uint32_t addr, uint32_t val)
++{
++	volatile uint32_t *sw = gk.pmif + (0x800 + 0x40 * gk.ch) / 4;
++	uint64_t end, t;
++
++	nanoseconds_to_absolutetime(2 * NSEC_PER_MSEC, &t);
++	end = mach_absolute_time() + t;
++	while (gk_swinf_state(sw) != 0) {
++		if (mach_absolute_time() > end) {
++			return -1;
++		}
++	}
++	sw[0x04 / 4] = val & 0xff;
++	sw[0] = (3u << 30) | (1u << 29) | (GK_SID << 24) | (addr & 0xffff);
++	end = mach_absolute_time() + t;
++	while (gk_swinf_state(sw) != 0) {
++		if (mach_absolute_time() > end) {
++			return -2;
++		}
++	}
++	return 0;
++}
++
++/*
++ * MT6363 interrupt groups (stock mtk-spmi-pmic.ko mt6363_ints): top status
++ * register 0x4e bit, first status register, number of status registers.
++ * PSC (power/home key) is bit 2 at 0x91b.
++ */
++static const struct {
++	uint8_t top_bit;
++	uint16_t sta;
++	uint8_t n;
++} gk_groups[] = {
++	{ 0, 0x141d, 2 }, { 1, 0x1b29, 4 }, { 2, 0x91b, 2 },
++	{ 3, 0x043, 2 }, { 4, 0xf9e, 2 }, { 6, 0xc36, 3 },
++};
++
++/* Clear (write back) the set status bits of one group; returns bits found. */
++static uint32_t
++gk_ack_group(unsigned g)
++{
++	uint32_t any = 0;
++
++	for (unsigned i = 0; i < gk_groups[g].n; i++) {
++		uint32_t reg = gk_groups[g].sta + i, v = 0;
++		if (gk_spmi_read(reg, &v) == 0 && (v & 0xff)) {
++			(void)gk_spmi_write(reg, v & 0xff);
++			if (gk.acks < 12) {
++				printf("G54 KEYS: PMIC irq status %03x = %02x cleared\n", reg, v & 0xff);
++			}
++			any |= v & 0xff;
++		}
++	}
++	return any;
++}
++
++/*
++ * Acknowledge PMIC interrupts the way the stock IRQ handler does: clear the
++ * status registers, then write 0x41b = 1. Without this, one power-key press
++ * starts a ~79 s countdown in 0xa15..0xa17 that ends in a cold reset (or a
++ * power-off on battery): g54-xnu E30; the acknowledgement cancels it (E31).
++ * The key group is checked every poll, the other groups once a second.
++ */
++static void
++gk_pmic_ack(bool all)
++{
++	uint32_t any = gk_ack_group(2);
++	uint32_t top = 0;
++
++	if (all && gk_spmi_read(0x4e, &top) == 0) {
++		for (unsigned g = 0; g < sizeof(gk_groups) / sizeof(gk_groups[0]); g++) {
++			if (g != 2 && (top & (1u << gk_groups[g].top_bit))) {
++				any |= gk_ack_group(g);
++			}
++		}
++	}
++	if (any) {
++		(void)gk_spmi_write(0x41b, 1);
++		gk.acks++;
++	}
 +}
 +
 +static void
@@ -146,7 +235,7 @@ index 0000000..db208ed
 +static void
 +gk_thread(void *arg __unused, wait_result_t wr __unused)
 +{
-+	uint32_t top = 0;
++	uint32_t top = 0, polls = 0;
 +	int rc = gk_spmi_read(GK_TOPSTATUS, &top);
 +
 +	printf("G54 KEYS: SPMI ch %u rc %d TOPSTATUS %02x KP_MEM1 %04x\n",
@@ -160,6 +249,7 @@ index 0000000..db208ed
 +		} else if (gk.spmi_err++ < 4) {
 +			printf("G54 KEYS: SPMI read failed\n");
 +		}
++		gk_pmic_ack((++polls % 50) == 0);
 +		gk_wait_ms(GK_POLL_MS);
 +	}
 +}
