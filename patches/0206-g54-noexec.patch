@@ -4,13 +4,14 @@ Daemons that cannot work on this hardware (bluetoothd, fairplayd.H2 on the
 G54) crash and are relaunched by launchd forever; each launch costs seconds
 of CPU on the Cortex-A55s (g54-xnu E29 previous-boot log). The check sits in
 SWEET's existing per-exec log hook and matches p_name exactly. Off unless
-the boot-arg is set.
+the boot-arg is set. A refusal fails the exec like the neighbouring platform
+check (EACCES with an OS_REASON_EXEC reason, which the failure path asserts).
 
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 68612db..632ade0 100644
+index 68612db..3607c8a 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -7412,6 +7412,36 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7412,6 +7412,40 @@ process_signature(proc_t p, struct image_params *imgp)
  				goto done;
  			}
  #if defined(ARM64_BOARD_CONFIG_SWEET)
@@ -37,7 +38,11 @@ index 68612db..632ade0 100644
 +						}
 +						if ((size_t)(e - c) == nl && nl && strncmp(c, p->p_name, nl) == 0) {
 +							printf("exec %s refused (g54noexec)\n", p->p_name);
-+							error = EPERM;
++							/* The failure path SIGKILLs with this reason and
++							 * asserts it is set (E36 panic without it). */
++							signature_failure_reason = os_reason_create(OS_REASON_EXEC,
++							    EXEC_EXIT_REASON_WRONG_PLATFORM);
++							error = EACCES;
 +							goto done;
 +						}
 +						c = *e ? e + 1 : e;
