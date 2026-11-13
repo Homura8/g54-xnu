@@ -96,6 +96,17 @@ disassembly (`out/vb/rd/lib/modules`, `out/dlkm`) answers register questions
 fastest; several agents may share this checkout: work on your own branch or
 worktree and commit explicit paths only.
 
+**Multiboot (offline only, 13 November 2026; nothing run on the phone):**
+one `boot_a` with a key menu for iOS, the stock Android kernel and Fastboot
+is built, verified against a synthetic stock image and emulated in QEMU
+([feasibility](multiboot-feasibility.md), `payload/multiboot`,
+`scripts/g54_multiboot.py`). The iOS entry is the unchanged `probe_main()`;
+the six probe builds stay byte-identical. Blockers: LK must load a boot
+image larger than the stock AVB `image_size` (H1) and `userdata` holds the
+iOS root, so Android needs a `userdata` wipe or a GPT split (owner
+decision). Optional next hardware step, after E38: **MB-E0** (menu only,
+select Fastboot) as written in the feasibility doc §7.
+
 ## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 usable by touch and keys on the G54
 
 [E26](experiments/2026-11-13-e26-ios-touch.md): kernel K3 (patch 0202,

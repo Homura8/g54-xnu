@@ -78,6 +78,28 @@ class MultibootAuditTests(unittest.TestCase):
         self.assertEqual(gpt["partitions"][0]["name"], "userdata")
         self.assertEqual(gpt["partitions"][0]["blocks"], 100)
 
+    def test_inspect_vbmeta_hash_and_chain_descriptors(self):
+        def desc(tag, body):
+            body += bytes(-len(body) % 8)
+            return struct.pack(">QQ", tag, len(body)) + body
+        name = b"boot"
+        hashd = struct.pack(">Q", 0x2345000) + b"sha256".ljust(32, b"\0")
+        hashd += struct.pack(">IIII", len(name), 32, 32, 0) + bytes(60) + name + b"S" * 32 + b"D" * 32
+        chaind = struct.pack(">IIII", 1, len(b"vbmeta_system"), 8, 0) + bytes(60) + b"vbmeta_system" + b"K" * 8
+        aux = desc(2, hashd) + desc(4, chaind)
+        hdr = bytearray(256)
+        struct.pack_into(">4sIIQQIQQQQQQQQQQQII", hdr, 0, b"AVB0", 1, 0, 0, len(aux), 0,
+                         0, 0, 0, 0, 0, 0, 0, 0, 0, len(aux), 0, 0, 0)
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "vbmeta.img"
+            p.write_bytes(bytes(hdr) + aux)
+            info = ma.inspect_vbmeta(p)
+        self.assertEqual(info["hash_descriptors"][0]["partition"], "boot")
+        self.assertEqual(info["hash_descriptors"][0]["image_size"], 0x2345000)
+        self.assertEqual(info["hash_descriptors"][0]["alg"], "sha256")
+        self.assertEqual(info["chains"][0]["partition"], "vbmeta_system")
+        self.assertEqual(info["chains"][0]["rollback_index_location"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

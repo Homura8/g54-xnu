@@ -161,42 +161,83 @@ def tool(name):
     raise PackError(f"{name} not found (brew install llvm lld)")
 
 
-def build(out_dir, phase1=None, phase2=None, extra_defs=()):
+CFLAGS = ["--target=aarch64-none-elf", "-ffreestanding", "-fno-builtin",
+          "-nostdlib", "-mstrict-align", "-mgeneral-regs-only", "-fno-pic",
+          "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
+          "-mcmodel=small", "-O2", "-Wall", "-Werror"]
+# PC-relative relocations only: the payload runs wherever LK put it.
+ALLOWED_RELOCS = ("R_AARCH64_ADR_PREL_PG_HI21", "R_AARCH64_ADD_ABS_LO12_NC",
+                  "R_AARCH64_CALL26", "R_AARCH64_JUMP26", "R_AARCH64_ADR_PREL_LO21",
+                  "R_AARCH64_LDST64_ABS_LO12_NC", "R_AARCH64_LDST32_ABS_LO12_NC",
+                  # low-12-bit halves of ADRP pairs, as position-independent as the above
+                  "R_AARCH64_LDST8_ABS_LO12_NC", "R_AARCH64_LDST16_ABS_LO12_NC",
+                  "R_AARCH64_LDST128_ABS_LO12_NC",
+                  "R_AARCH64_CONDBR19")
+# Defined by the linker scripts, not by any object.
+LINKER_SYMBOLS = {"__bss_start", "__bss_end", "_end"}
+
+
+def check_relocs(objs):
+    """Position independence: only PC-relative relocations may exist."""
+    rel = subprocess.run([tool("llvm-objdump"), "-r", *objs], check=True,
+                         capture_output=True, text=True).stdout
+    for line in rel.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].startswith("R_AARCH64") and parts[1] not in ALLOWED_RELOCS:
+            raise PackError(f"non PC-relative relocation: {line.strip()}")
+
+
+def check_no_libcalls(objs):
+    """Nothing may stay unresolved: freestanding code has no libc, and clang
+    can turn a zeroing loop or a large initialiser into a memset/memcpy call."""
+    nm = tool("llvm-nm")
+    undef, defined = set(), set(LINKER_SYMBOLS)
+    for obj in objs:
+        undef |= set(subprocess.run([nm, "-u", "-j", obj], check=True, capture_output=True,
+                                    text=True).stdout.split())
+        defined |= set(subprocess.run([nm, "--defined-only", "-j", obj], check=True,
+                                      capture_output=True, text=True).stdout.split())
+    missing = sorted(undef - defined)
+    if missing:
+        raise PackError(f"unresolved symbols (compiler-emitted library calls?): {', '.join(missing)}")
+
+
+def compile_link(src_dir, sources, ldscript, out_dir, name, defs=()):
+    """Compile `sources` from `src_dir`, check them, link with `ldscript`.
+    Returns (elf, bin) paths in `out_dir`."""
     os.makedirs(out_dir, exist_ok=True)
+    objs = []
+    for src in sources:
+        obj = os.path.join(out_dir, src + ".o")
+        subprocess.run(["clang", *CFLAGS, *defs, "-c", os.path.join(src_dir, src), "-o", obj], check=True)
+        objs.append(obj)
+    check_no_libcalls(objs)
+    elf = os.path.join(out_dir, name + ".elf")
+    subprocess.run([tool("ld.lld"), "-T", os.path.join(src_dir, ldscript), "-static",
+                    "--no-dynamic-linker", "-o", elf, *objs], check=True)
+    check_relocs(objs)
+    binf = os.path.join(out_dir, name + ".bin")
+    subprocess.run([tool("llvm-objcopy"), "-O", "binary", elf, binf], check=True)
+    return elf, binf
+
+
+def symbol(elf, name):
+    """Address of `name` in a linked payload ELF (e.g. _end)."""
+    nm = subprocess.run([tool("llvm-nm"), elf], capture_output=True, text=True, check=True).stdout
+    for line in nm.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2] == name:
+            return int(parts[0], 16)
+    raise PackError(f"{elf}: no symbol {name}")
+
+
+def build(out_dir, phase1=None, phase2=None, extra_defs=()):
     defs = [f"-D{d}" for d in extra_defs]
     if phase1 is not None:
         defs.append(f"-DPHASE1_S={int(phase1)}")
     if phase2 is not None:
         defs.append(f"-DPHASE2_S={int(phase2)}")
-    cflags = ["--target=aarch64-none-elf", "-ffreestanding", "-fno-builtin",
-              "-nostdlib", "-mstrict-align", "-mgeneral-regs-only", "-fno-pic",
-              "-fno-stack-protector", "-fno-asynchronous-unwind-tables",
-              "-mcmodel=small", "-O2", "-Wall", "-Werror", *defs]
-    objs = []
-    for src in ("entry.S", "probe.c"):
-        obj = os.path.join(out_dir, src + ".o")
-        subprocess.run(["clang", *cflags, "-c", os.path.join(SRC, src), "-o", obj], check=True)
-        objs.append(obj)
-    elf = os.path.join(out_dir, "probe.elf")
-    subprocess.run([tool("ld.lld"), "-T", os.path.join(SRC, "probe.ld"), "-static",
-                    "--no-dynamic-linker", "-o", elf, *objs], check=True)
-    # Position independence: only PC-relative relocations may exist.
-    rel = subprocess.run([tool("llvm-objdump"), "-r", *objs], check=True,
-                         capture_output=True, text=True).stdout
-    allowed = ("R_AARCH64_ADR_PREL_PG_HI21", "R_AARCH64_ADD_ABS_LO12_NC",
-               "R_AARCH64_CALL26", "R_AARCH64_JUMP26", "R_AARCH64_ADR_PREL_LO21",
-               "R_AARCH64_LDST64_ABS_LO12_NC", "R_AARCH64_LDST32_ABS_LO12_NC",
-               # low-12-bit halves of ADRP pairs, as position-independent as the above
-               "R_AARCH64_LDST8_ABS_LO12_NC", "R_AARCH64_LDST16_ABS_LO12_NC",
-               "R_AARCH64_LDST128_ABS_LO12_NC",
-               "R_AARCH64_CONDBR19")
-    for line in rel.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[1].startswith("R_AARCH64") and parts[1] not in allowed:
-            raise PackError(f"non PC-relative relocation: {line.strip()}")
-    binf = os.path.join(out_dir, "probe.bin")
-    subprocess.run([tool("llvm-objcopy"), "-O", "binary", elf, binf], check=True)
-    return binf
+    return compile_link(SRC, ("entry.S", "probe.c"), "probe.ld", out_dir, "probe", defs)[1]
 
 
 def sha256(data):

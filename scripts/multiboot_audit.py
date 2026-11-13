@@ -272,14 +272,21 @@ def inspect_vbmeta(path: Path) -> dict:
             props[k] = v
         elif tag == 1:
             hashtrees += 1
-        elif tag == 2 and len(body) >= 56:
-            img_sz, pn_len, salt_len, dig_len, hflags = struct.unpack_from(">QIIII", body, 0)
-            alg_name = body[24:56].split(b"\0")[0].decode(errors="replace")
-            # Android AVBHashDescriptor has 64 bytes reserved after flags before part_name (total header 120 bytes? wait: 24+32+64? No: struct AvbHashDescriptor = 16(parent)+8(img)+4(pn)+4(salt)+4(dig)+4(flags)+32(alg)+60(reserved)=132? Let's locate ASCII alg+name cleanly)
-            hashes.append({"image_size": img_sz, "alg": alg_name, "flags": hflags})
-        elif tag == 4 and len(body) >= 12:
+        elif tag == 2 and len(body) >= 116:
+            # libavb AvbHashDescriptor after the 16-byte tag/num_bytes: u64 image_size,
+            # hash_algorithm[32], u32 partition_name_len, salt_len, digest_len, flags,
+            # reserved[60], then the partition name.
+            img_sz = struct.unpack_from(">Q", body, 0)[0]
+            alg_name = body[8:40].split(b"\0")[0].decode(errors="replace")
+            pn_len, _salt_len, _dig_len, hflags = struct.unpack_from(">IIII", body, 40)
+            name = body[116:116 + pn_len].decode(errors="replace")
+            hashes.append({"partition": name, "image_size": img_sz, "alg": alg_name, "flags": hflags})
+        elif tag == 4 and len(body) >= 76:
+            # AvbChainPartitionDescriptor: u32 rollback_index_location, partition_name_len,
+            # public_key_len, flags, reserved[60], then the name and the key.
             rb_loc2, pn_len, pk_len = struct.unpack_from(">III", body, 0)
-            chains.append({"rollback_index_location": rb_loc2, "public_key_len": pk_len})
+            name = body[76:76 + pn_len].decode(errors="replace")
+            chains.append({"partition": name, "rollback_index_location": rb_loc2, "public_key_len": pk_len})
         pos += 16 + num_bytes
     return {
         "path": str(path),
@@ -294,7 +301,9 @@ def inspect_vbmeta(path: Path) -> dict:
         "release_string": rel,
         "properties": props,
         "chain_count": len(chains),
+        "chains": chains,
         "hash_count": len(hashes),
+        "hash_descriptors": hashes,
         "hashtree_count": hashtrees,
     }
 
@@ -498,6 +507,12 @@ def run_offline_audit(args: argparse.Namespace) -> dict:
         est = report["boot"]["kernel_size_compressed"] + int(report["xnu_payload"]["bytes"] * 0.6) + report["boot"]["ramdisk_size"] + 131072
         checks["dual_kernel_boot_a_est_bytes"] = est
         checks["fits_in_64mib_boot_a"] = est <= 64 * 1024 * 1024
+    boot_desc = [h for v in report.get("vbmeta", []) for h in v.get("hash_descriptors", [])
+                 if h.get("partition") == "boot"]
+    if boot_desc:
+        # g54_multiboot.py grows the boot sections past this size: LK must then load
+        # boot_a by its header, not by this AVB image_size (H1 in docs/multiboot-feasibility.md).
+        checks["boot_avb_image_size"] = boot_desc[0]["image_size"]
     if "super" in report and "total_allocated_bytes" in report["super"]:
         max_main = max((g["max_size_bytes"] for g in report["super"]["groups"]), default=0)
         checks["super_allocated_bytes"] = report["super"]["total_allocated_bytes"]

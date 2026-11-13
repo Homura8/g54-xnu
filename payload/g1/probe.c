@@ -1368,7 +1368,7 @@ static void touch_fw(void)
 #endif /* TOUCH_FW */
 
 
-#if defined(KEY_SCAN) || defined(PMIC_DIFF)
+#if defined(KEY_SCAN) || defined(PMIC_DIFF) || defined(G54_MULTIBOOT)
 /*
  * E27: G54 key hardware, read live (no writes except SPMI read commands).
  *   Volume up:   MTK KPD 0x1c00e000 (DTBO hw-init-map key 0 = 0x73),
@@ -1408,7 +1408,7 @@ static int spmi_rd(u32 ch, u32 sid, u32 addr, u32 *out)
     return 0;
 }
 
-#ifdef PMIC_ACK
+#if defined(PMIC_ACK) || defined(G54_MULTIBOOT)   /* multiboot: PSC ack */
 /* One-byte SPMI extended-long write (WDATA +0x04, write bit 29), as the stock
  * PMIF driver does; done when the channel returns to idle. */
 static int spmi_wr(u32 ch, u32 sid, u32 addr, u32 val)
@@ -1622,7 +1622,7 @@ static void pmic_diff_test(void)
     cx = cy = 0;
 }
 #endif /* PMIC_DIFF */
-#endif /* KEY_SCAN || PMIC_DIFF */
+#endif /* KEY_SCAN || PMIC_DIFF || G54_MULTIBOOT */
 
 static void ufs_diag_fix(void)
 {
