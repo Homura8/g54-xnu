@@ -1,0 +1,211 @@
+G54: polled side keys (boot-arg g54keys=1).
+
+Volume up is MTK KPD 0x1c00e000 KP_MEM1 bit 0; power and volume down are
+MT6363 TOPSTATUS 0x1e bits 1 and 3, read over SPMI through the AP's PMIF
+software channel (SWINF 2 at PMIF 0x1c804000 + 0x880, as the stock
+spmi-mtk-pmif.ko selects for MT6855). Offsets from the stock
+mtk-pmic-keys.ko and spmi-mtk-pmif.ko, checked live by the g54-xnu probe
+(E27). A thread polls every 20 ms with a two-sample debounce and reports
+through sweet_hid_key(). The PMIC is only read. Off by default.
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index f9509b8..ce5d8ee 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/g54_keys.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/ruby_keys.c			standard
+diff --git a/bsd/dev/g54_keys.c b/bsd/dev/g54_keys.c
+new file mode 100644
+index 0000000..db208ed
+--- /dev/null
++++ b/bsd/dev/g54_keys.c
+@@ -0,0 +1,168 @@
++/*
++ * G54 (Moto G54, MT6855): side keys, polled.
++ *
++ *   volume up    MTK KPD 0x1c00e000, KP_MEM1 (0x04) bit 0, 0 = pressed
++ *                (DTBO hw-init-map key 0 = KEY_VOLUMEUP)
++ *   power        MT6363 PMIC (SPMI slave 4) TOPSTATUS 0x1e bit 1, 0 = pressed
++ *   volume down  MT6363 TOPSTATUS 0x1e bit 3 (PMIC "home" key, DTBO
++ *                sw-rstkey = KEY_VOLUMEDOWN), 0 = pressed
++ *
++ * Register offsets come from the stock mtk-pmic-keys.ko (mt6363_regs) and
++ * spmi-mtk-pmif.ko (mediatek,mt6855-spmi: SWINF n at PMIF+0x800+0x40n) and
++ * were checked live by the g54-xnu probe (docs/experiments E27: TOPSTATUS
++ * idle 0x1e, all three keys seen). The PMIC is
++ * only read (SPMI extended-long read commands); nothing is written to it.
++ *
++ * A kernel thread polls every 20 ms, needs two equal samples before a state
++ * change and reports through sweet_hid_key() (0 power, 1 volume up,
++ * 2 volume down). Enabled by boot-arg g54keys=1. Only the AP's PMIF software
++ * channel is used: SWINF 2, as the stock driver selects (regs[25 + 5 *
++ * soc_chan], soc_chan = 2 for MT6855). SWINF 0 belongs to another master;
++ * reading through it (probe E27) was followed by spontaneous full resets.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <libkern/libkern.h>
++#include <mach/mach_time.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void sweet_hid_key(int key, int down);
++
++#define GK_KPD_PA       0x1c00e000u
++#define GK_PMIF_PA      0x1c804000u
++#define GK_KP_MEM1      0x04
++#define GK_SID          4u
++#define GK_TOPSTATUS    0x1eu
++#define GK_POLL_MS      20u
++
++enum { GK_POWER = 0, GK_VUP = 1, GK_VDOWN = 2, GK_NKEYS = 3 };
++
++static struct {
++	volatile uint32_t *kpd;
++	volatile uint32_t *pmif;
++	uint32_t ch;
++	bool down[GK_NKEYS];
++	bool cand[GK_NKEYS];
++	uint64_t spmi_err, presses;
++	bool started;
++} gk;
++
++static int gk_sleep_chan;
++
++static void
++gk_wait_ms(unsigned ms)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&gk_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++static uint32_t
++gk_swinf_state(volatile uint32_t *sw)
++{
++	return (sw[0x28 / 4] >> 1) & 7;
++}
++
++/* One-byte SPMI extended-long read through PMIF software channel gk.ch. */
++static int
++gk_spmi_read(uint32_t addr, uint32_t *val)
++{
++	volatile uint32_t *sw = gk.pmif + (0x800 + 0x40 * gk.ch) / 4;
++	uint64_t end, t;
++
++	nanoseconds_to_absolutetime(2 * NSEC_PER_MSEC, &t);
++	end = mach_absolute_time() + t;
++	while (gk_swinf_state(sw) != 0) {
++		if (mach_absolute_time() > end) {
++			return -1;
++		}
++	}
++	sw[0] = (3u << 30) | (GK_SID << 24) | (addr & 0xffff);
++	end = mach_absolute_time() + t;
++	while (gk_swinf_state(sw) != 6) {
++		if (mach_absolute_time() > end) {
++			return -2;
++		}
++	}
++	*val = sw[0x14 / 4];
++	sw[0x24 / 4] = 1;
++	return 0;
++}
++
++static void
++gk_update(int key, bool now)
++{
++	if (now != gk.cand[key]) {
++		gk.cand[key] = now;     /* first sample of a change: confirm next poll */
++		return;
++	}
++	if (now != gk.down[key]) {
++		gk.down[key] = now;
++		if (now && gk.presses++ < 6) {
++			printf("G54 KEYS: key %d down\n", key);
++		}
++		sweet_hid_key(key, now ? 1 : 0);
++	}
++}
++
++static void
++gk_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	uint32_t top = 0;
++	int rc = gk_spmi_read(GK_TOPSTATUS, &top);
++
++	printf("G54 KEYS: SPMI ch %u rc %d TOPSTATUS %02x KP_MEM1 %04x\n",
++	    gk.ch, rc, top & 0xff, gk.kpd[GK_KP_MEM1 / 4] & 0xffff);
++	for (;;) {
++		uint32_t kp = gk.kpd[GK_KP_MEM1 / 4];
++		gk_update(GK_VUP, (kp & 1) == 0);
++		if (gk_spmi_read(GK_TOPSTATUS, &top) == 0) {
++			gk_update(GK_POWER, (top & 0x2) == 0);
++			gk_update(GK_VDOWN, (top & 0x8) == 0);
++		} else if (gk.spmi_err++ < 4) {
++			printf("G54 KEYS: SPMI read failed\n");
++		}
++		gk_wait_ms(GK_POLL_MS);
++	}
++}
++
++void g54_keys_init(void);
++
++void
++g54_keys_init(void)
++{
++	int on = 0;
++	thread_t thread;
++
++	if (gk.started) {
++		return;
++	}
++	gk.started = true;
++	if (!PE_parse_boot_argn("g54keys", &on, sizeof(on)) || on != 1) {
++		return;
++	}
++	gk.ch = 2;
++	gk.kpd = (volatile uint32_t *)ml_io_map(GK_KPD_PA, 0x1000);
++	gk.pmif = (volatile uint32_t *)ml_io_map(GK_PMIF_PA, 0x1000);
++	if (!gk.kpd || !gk.pmif) {
++		printf("G54 KEYS: mapping failed\n");
++		return;
++	}
++	if (kernel_thread_start(gk_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("G54 KEYS: thread start failed\n");
++	}
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index c46f87f..2eaecbd 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -693,6 +693,10 @@ sweet_ufs_init(void)
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
+ 	sweet_sample_start();
++	{
++		extern void g54_keys_init(void);
++		g54_keys_init();	/* G54 side keys, boot-arg g54keys=1 */
++	}
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	int hw = 0;
+ 	PE_parse_boot_argn("sweethw", &hw, sizeof(hw));

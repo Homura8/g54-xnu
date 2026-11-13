@@ -24,14 +24,25 @@ set -euo pipefail
 [[ $(id -u) == 0 ]] || { echo "run with sudo (root owners must be preserved)" >&2; exit 1; }
 ipsw=$(realpath "$1") topaz=$(realpath "$2") out=$3 size=${4:-16g}
 [[ ! -e $out ]] || { echo "refusing to overwrite $out" >&2; exit 1; }
+# macOS realpath requires the final component to exist. Resolve only the
+# parent: the output image must not exist yet.
+mkdir -p "$(dirname "$out")"
+out="$(cd "$(dirname "$out")" && pwd -P)/$(basename "$out")"
 RSYNC=${RSYNC:-/opt/homebrew/bin/rsync}
-"$RSYNC" --version | head -1 | grep -q 'version 3' || { echo "need GNU rsync 3 (brew install rsync)" >&2; exit 1; }
+# Read the full output before inspecting it: head/grep -q may close their
+# pipes early, giving rsync SIGPIPE and failing this check under pipefail.
+rsync_version=$("$RSYNC" --version)
+[[ $rsync_version == *'version 3.'* ]] || { echo "need GNU rsync 3 (brew install rsync)" >&2; exit 1; }
 
 OS=087-86698-044.dmg SYSOS=087-86593-047.dmg APPOS=087-86715-047.dmg   # BuildManifest d22ap Erase
-work=$(mktemp -d "$(dirname "$(realpath "$out")")/iosroot.XXXX")
+work=$(mktemp -d "$(dirname "$out")/iosroot.XXXXXX")
 attached=()
 cleanup() {
-	for d in "${attached[@]}"; do hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
+	# A manually mounted filesystem may not be known to Disk Arbitration.
+	# Unmount it explicitly before detaching its backing image.
+	if [[ -d $work/root ]]; then umount "$work/root" >/dev/null 2>&1 || true; fi
+	# /bin/bash 3.2 treats an empty array as unset under nounset.
+	for d in ${attached[@]+"${attached[@]}"}; do hdiutil detach -force "$d" >/dev/null 2>&1 || true; done
 	rm -f "$work"/*.dmg
 	rmdir "$work"/* "$work" 2>/dev/null || true
 }
@@ -45,7 +56,7 @@ attach_ro() {  # image mountpoint [raw]
 	local extra=()
 	[[ ${3:-} == raw ]] && extra=(-imagekey diskimage-class=CRawDiskImage)
 	local dev
-	dev=$(hdiutil attach "${extra[@]}" -readonly -nobrowse -noverify -owners on -mountpoint "$2" "$1" |
+	dev=$(hdiutil attach ${extra[@]+"${extra[@]}"} -readonly -nobrowse -noverify -owners on -mountpoint "$2" "$1" |
 		awk 'NR==1{print $1}')
 	attached+=("$dev")
 }
@@ -58,8 +69,14 @@ rdev=$(hdiutil attach -nomount -imagekey diskimage-class=CRawDiskImage "$out" | 
 attached=("$rdev" "${attached[@]}")
 newfs_hfs -s -J -v iOSRoot "$rdev"
 mkdir -p "$work/root"
-mount -t hfs "$rdev" "$work/root"
-diskutil enableOwnership "$work/root" >/dev/null
+# Reattach the formatted raw filesystem through DiskImages so ownership and
+# the mount point are registered together. diskutil enableOwnership cannot
+# resolve a mount made directly with mount(8) on this macOS release.
+hdiutil detach "$rdev" >/dev/null
+attached=("${attached[@]:1}")
+rdev=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nobrowse -noverify \
+	-owners on -mountpoint "$work/root" "$out" | awk 'NR==1{print $1}')
+attached=("$rdev" "${attached[@]}")
 R=$work/root
 
 copy() {
@@ -106,4 +123,9 @@ fsck_hfs -fy "$rdev" || true
 fsck_hfs -fn "$rdev"
 hdiutil detach "$rdev" >/dev/null
 attached=("${attached[@]:1}")
+# mkfile creates mode 0600 as root. Return the finished image to the invoking
+# owner so hashing and fastboot can read it without another privileged command.
+if [[ -n ${SUDO_UID:-} && -n ${SUDO_GID:-} ]]; then
+	chown "$SUDO_UID:$SUDO_GID" "$out"
+fi
 echo "root image: $out ($(du -h "$out" | cut -f1) used of $size)"

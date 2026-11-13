@@ -29,6 +29,10 @@ verified Motorola package. Supersedes the 5-8-3 table below where they differ.
 | Manual Fastboot | Power + Volume Down → `reason: Volume down key pressed` | E1 |
 | Exception level at kernel entry | **EL1** (not EL2) | E2 on-screen diagnostic |
 | XNU on the G54 | ruby's kernel + `0200-g54-early-framebuffer` boots to IOKit: `RUBY GIC: ready gicd=1`, SGI1 OK on cpu0 (MPIDR Aff 0), AppleCLCD at `0xfeac6000` stride 4320 | [E5](experiments/2026-11-12-e5-xnu-first-boot.md) |
+| iOS root / userspace | HFS+ `iOSRoot` mounted read-write as `/dev/ufsroot0`; Apple's launchd PID 1 completes early boot; `exec SpringBoard` visible. No GUI observed; one CPU | [E15](experiments/2026-11-12-e15-ios-root.md), owner photos IMG_4316–IMG_4325 |
+| Six-A55 startup | owner reports `6/6 CPUs initialized, SGI1 verified`; boot still progressing. A78 cores untested | [E16](experiments/2026-11-12-e16-six-a55.md), owner chat observation |
+| Graphical iOS output | Apple logo on panel, framebuffer layer 0 using IOSurfaces 2/3 copied to `0xfeac6000`, 1080×2400. First logo photos received by 02:04:57 UTC, 13 November; lock/home screen unobserved | [E18](experiments/2026-11-13-e18-dyld-dof.md), owner photos and on-screen framebuffer diagnostics |
+| iOS input-service connection | backboardd opens `SweetHIDTouch` via `IOHIDEventServiceUserClient`; physical G54 touch events unverified | E18 owner photos |
 | Watchdog at kernel entry | enabled (`WDT_MODE` bit 0 = 1); feed it at `0x1c007008` with `0x1971` | E2 |
 
 **Matching restore images:** the package
@@ -137,3 +141,8 @@ Before anything other than read-only commands: save the stock `boot`,
 `vendor_boot`, `init_boot`, `dtbo`, `vbmeta*` and `lk*` images for the current
 slot, record their SHA-256 here (never commit the images), and confirm that the
 recovery path restores them. Unlocking normally wipes user data.
+
+## Proven on the G54 (13 November 2026)
+
+- UFS HS-G3, 2+2 lanes, rate B after the probe's reset/link/fDeviceInit (E20); device max RX HS gear 3, host 3.
+- iOS 16.7.16 SpringBoard home screen with the K2 kernel, six A55s and the E15 root (E21, owner photo).

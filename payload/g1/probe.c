@@ -161,6 +161,7 @@ struct handoff {
     int nmem, nres;
     struct range mem[MAX_MEM], res[MAX_RES];
 };
+static struct handoff h;
 
 static void add(struct range *arr, int *n, int max, u64 base, u64 size)
 {
@@ -338,8 +339,9 @@ static void px(u32 x, u32 y, u32 c, u32 stride)
 }
 
 #define SCALE 4
-#define CW (6 * SCALE)
-#define CH (9 * SCALE)
+static u32 sc = SCALE;          /* glyph scale; the last-log page uses 2 */
+#define CW (6 * sc)
+#define CH (9 * sc)
 static u32 cx, cy;
 
 static void putc_(char ch, u32 color)
@@ -357,9 +359,9 @@ static void putc_(char ch, u32 color)
     for (u32 r = 0; r < 7; r++)
         for (u32 c = 0; c < 5; c++)
             if (g[r] & (0x10 >> c))
-                for (u32 dy = 0; dy < SCALE; dy++)
-                    for (u32 dx = 0; dx < SCALE; dx++)
-                        px(12 + cx + c * SCALE + dx, 12 + cy + r * SCALE + dy, color, pitch);
+                for (u32 dy = 0; dy < sc; dy++)
+                    for (u32 dx = 0; dx < sc; dx++)
+                        px(12 + cx + c * sc + dx, 12 + cy + r * sc + dy, color, pitch);
     cx += CW;
     if (cx + CW > FB_W - 24) {
         cx = 0;
@@ -388,6 +390,105 @@ static void kv(const char *k, u64 v, int digits)
 }
 
 static void dump_engines(void);
+
+
+#ifdef TOUCH_SCAN
+/*
+ * E22: which touch controller does this unit have? LK merges one dtbo
+ * overlay (panel-specific) into the DTB it passes us. Print every node whose
+ * first compatible looks like a touch IC, with status, name and parent (the
+ * bus), plus /chosen mmi,panel_name.
+ */
+#define TS_MAXD 16
+/* Explicit literals: a pointer table would need absolute relocations. */
+static int ts_match(const volatile u8 *c)
+{
+    return contains(c, "nt36") || contains(c, "novatek") || contains(c, "focaltech") ||
+           contains(c, "fts") || contains(c, "ilitek") || contains(c, "chipone") ||
+           contains(c, "icnl") || contains(c, "goodix") || contains(c, "himax") ||
+           contains(c, "touch");
+}
+
+static void puts_v(const volatile u8 *p, int max, u32 color)
+{
+    for (int i = 0; i < max && p[i]; i++)
+        putc_((char)p[i], color);
+}
+
+static void touch_scan(u64 dtb)
+{
+    const volatile u8 *b = (const volatile u8 *)dtb;
+    if (!dtb || be32(b) != FDT_MAGIC)
+        return;
+    u32 total = be32(b + 4), off_struct = be32(b + 8), off_str = be32(b + 12);
+    const volatile u8 *p = b + off_struct, *end = b + total;
+    static const volatile u8 *name[TS_MAXD], *compat[TS_MAXD], *status[TS_MAXD];
+    static int done[TS_MAXD];   /* .bss: zeroed by entry.S; one scan per buffer */
+    for (int i = 0; i < TS_MAXD; i++) {
+        name[i] = compat[i] = status[i] = 0;
+        done[i] = 1;
+    }
+    int depth = 0, shown = 0;
+    puts_("TOUCH SCAN\n", GREEN);
+    for (u32 guard = 0; guard < 400000U && p + 4 <= end && shown < 12; guard++) {
+        u32 tok = be32(p);
+        p += 4;
+        if (tok == FDT_BEGIN_NODE || tok == FDT_END_NODE) {
+            /* the node at `depth` has all its own properties now */
+            if (depth > 0 && depth < TS_MAXD && !done[depth]) {
+                done[depth] = 1;
+                if (compat[depth] && ts_match(compat[depth])) {
+                    puts_v(compat[depth], 30, WHITE);
+                    puts_(" ", WHITE);
+                    puts_v(status[depth] ? status[depth] : (const volatile u8 *)"(no status)", 9,
+                           status[depth] && streq(status[depth], "okay") ? GREEN : GREY);
+                    puts_("\n  ", WHITE);
+                    puts_v(name[depth], 24, GREY);
+                    puts_(" IN ", GREY);
+                    puts_v(depth > 1 ? name[depth - 1] : (const volatile u8 *)"/", 24, GREY);
+                    puts_("\n", WHITE);
+                    shown++;
+                }
+            }
+            if (tok == FDT_BEGIN_NODE) {
+                depth++;
+                if (depth < TS_MAXD) {
+                    name[depth] = p;
+                    compat[depth] = status[depth] = 0;
+                    done[depth] = 0;
+                }
+                while (p < end && *p)
+                    p++;
+                p = (const volatile u8 *)(((u64)p + 4) & ~3UL);
+            } else {
+                depth--;
+            }
+        } else if (tok == FDT_PROP) {
+            u32 len = be32(p), nameoff = be32(p + 4);
+            p += 8;
+            const volatile u8 *pn = b + off_str + nameoff;
+            if (depth < TS_MAXD && len) {
+                if (streq(pn, "compatible"))
+                    compat[depth] = p;
+                else if (streq(pn, "status"))
+                    status[depth] = p;
+                else if (depth == 2 && streq(pn, "mmi,panel_name")) {
+                    puts_("PANEL ", GREEN);
+                    puts_v(p, 40, WHITE);
+                    puts_("\n", WHITE);
+                }
+            }
+            p += (len + 3) & ~3U;
+        } else if (tok == FDT_NOP) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if (!shown)
+        puts_("  NO TOUCH NODES\n", GREY);
+}
+#endif /* TOUCH_SCAN */
 
 static void info_screen(const struct handoff *h, u64 pc, int which)
 {
@@ -440,6 +541,12 @@ static void info_screen(const struct handoff *h, u64 pc, int which)
         hex(fr[i].size, 9, WHITE);
         puts_(i & 1 ? "\n" : "  ", WHITE);
     }
+#if defined(TOUCH_SCAN)
+    puts_("\n", WHITE);
+    touch_scan(h->dtb);
+#elif defined(NO_RESV)
+    /* reserved list omitted for space (recorded in E4) */
+#else
     puts_("\nRESERVED ", GREEN);
     hex(h->nres, 2, WHITE);
     puts_(" IN ", GREEN);
@@ -453,6 +560,7 @@ static void info_screen(const struct handoff *h, u64 pc, int which)
         if ((i & 7) == 0)
             kick();
     }
+#endif
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
@@ -820,6 +928,520 @@ static void ufs_dev_init(void)
     w32(UFS + U_IS, r32(UFS + U_IS));
 }
 
+
+#ifdef UFS_HS
+/*
+ * E20: E13/E14 leave the link in PWM slow-auto (peer PA_PWRMODE 0x55), while
+ * LK ran it FAST (E8: 0x11). iOS boot (E15-E18) then takes ~30 min. Restore
+ * HS like Linux ufshcd_change_power_mode(): gear = min(local, peer
+ * PA_MAXRXHSGEAR), rate B, terminations on, all connected lanes, the default
+ * DL timeouts in PA_PWRMODEUSERDATA0-5 and DME_Local*TimeOutVal, then
+ * PA_PWRMODE = FAST/FAST and wait for IS.UPMS; HCS.UPMCRS 1 = PWR_LOCAL.
+ * Attribute IDs: include/ufs/unipro.h. No PMC via FASTAUTO: that MediaTek
+ * path is for HS-G4+.
+ */
+#define IS_UPMS     (1U << 4)
+
+static void ufs_hs(void)
+{
+    u32 lmax = 0, pmax = 0, tx = 0, rx = 0;
+    ufs_uic(0x01, 0x1587U << 16, &lmax);           /* local PA_MAXRXHSGEAR */
+    ufs_uic(0x03, 0x1587U << 16, &pmax);           /* peer PA_MAXRXHSGEAR */
+    ufs_uic(0x01, 0x1561U << 16, &tx);             /* PA_CONNECTEDTXDATALANES */
+    ufs_uic(0x01, 0x1581U << 16, &rx);             /* PA_CONNECTEDRXDATALANES */
+    u32 gear = lmax < pmax ? lmax : pmax;
+    if (gear > 4)
+        gear = 4;
+    puts_("    HS ", GREEN);
+    kv("MAX L", lmax, 1);
+    kv("P", pmax, 1);
+    kv("GEAR", gear, 1);
+    kv("LN", (tx << 4) | rx, 2);
+    puts_("\n", WHITE);
+    if (gear == 0 || tx == 0 || rx == 0)
+        return;
+    u32 bad = 0;
+    bad |= dme_set(0x1568, 0, gear);               /* PA_TXGEAR */
+    bad |= dme_set(0x1583, 0, gear);               /* PA_RXGEAR */
+    bad |= dme_set(0x156a, 0, 2);                  /* PA_HSSERIES = rate B */
+    bad |= dme_set(0x1569, 0, 1);                  /* PA_TXTERMINATION */
+    bad |= dme_set(0x1584, 0, 1);                  /* PA_RXTERMINATION */
+    bad |= dme_set(0x1560, 0, tx);                 /* PA_ACTIVETXDATALANES */
+    bad |= dme_set(0x1580, 0, rx);                 /* PA_ACTIVERXDATALANES */
+    bad |= dme_set(0x15b0, 0, 8191);               /* PA_PWRMODEUSERDATA0..5 */
+    bad |= dme_set(0x15b1, 0, 65535);
+    bad |= dme_set(0x15b2, 0, 32767);
+    bad |= dme_set(0x15b3, 0, 8191);
+    bad |= dme_set(0x15b4, 0, 65535);
+    bad |= dme_set(0x15b5, 0, 32767);
+    bad |= dme_set(0xd041, 0, 8191);               /* DME_Local*TimeOutVal */
+    bad |= dme_set(0xd042, 0, 65535);
+    bad |= dme_set(0xd043, 0, 32767);
+    w32(UFS + U_IS, IS_UPMS);
+    u32 rc = dme_set(0x1571, 0, 0x11);             /* PA_PWRMODE = FAST/FAST */
+    u64 end = ticks() + freq();
+    while (!(r32(UFS + U_IS) & IS_UPMS) && ticks() < end)
+        ;
+    u32 is = r32(UFS + U_IS), upmcrs = (r32(UFS + U_HCS) >> 8) & 7;
+    w32(UFS + U_IS, is);
+    u32 lpm = 0, ppm = 0, g = 0;
+    ufs_uic(0x01, 0x1571U << 16, &lpm);
+    ufs_uic(0x03, 0x1571U << 16, &ppm);
+    ufs_uic(0x01, 0x1568U << 16, &g);
+    puts_("    PMC ", GREEN);
+    kv("SET", bad, 2);
+    kv("RC", rc, 2);
+    kv("UPMCRS", upmcrs, 1);
+    kv("PWR L", lpm, 2);
+    kv("P", ppm, 2);
+    kv("TXG", g, 1);
+    puts_("\n", WHITE);
+}
+#endif /* UFS_HS */
+
+
+#ifdef TOUCH_SPI
+/*
+ * E23: SPI3 bring-up and Novatek NT36672C chip-ID read (touch stage 1).
+ * G54 values (docs/experiments/2026-11-13-e22-touch-scan.md):
+ *   SPI3 0x11013000 ("mediatek,mt6983-spi"), pad-select 0 for CS0;
+ *   clock peraop_spi3_bclk = pericfg_ao 0x11036000 bit 14 (sta 0x10,
+ *   clr/ungate 0x2c, set/gate 0x28; decoded from stock clk-mt6855-peri.ko);
+ *   pins GPIO73-76 function 2 (GPIO_MODE9 nibbles 1-4); TP reset GPIO3.
+ * Controller sequence: ruby-ios-bringup bsd/dev/ruby_spi3.c (FIFO mode,
+ * <= 32-byte packets). Novatek SPI framing (public nt36xxx driver behaviour):
+ * page = {0xff, a>>15, a>>7}; write = {(a&0x7f)|0x80, data...};
+ * read = {a&0x7f, dummy, ...} with data from the third byte.
+ */
+#define SPI3        0x11013000UL
+#define S_CFG0      0x00
+#define S_CFG1      0x04
+#define S_TX        0x10
+#define S_RX        0x14
+#define S_CMD       0x18
+#define S_ST0       0x1c
+#define S_PAD       0x24
+#define S_CFG2      0x28
+#define S_CFG3      0x2c
+#define C_ACT       (1U << 0)
+#define C_RST       (1U << 2)
+#define C_PAUSE     (1U << 4)
+#define C_MSB       ((1U << 12) | (1U << 13))
+#define PERAO       0x11036000UL
+#define GPIOB       0x10005000UL
+#define NVT_SWRST   0x3f0feU
+#define NVT_TRIM    0x3f004U
+
+static int spi_xfer(const u8 *tx, u8 *rx, u32 len)
+{
+    w32(SPI3 + S_CMD, C_RST);
+    w32(SPI3 + S_CMD, 0);
+    w32(SPI3 + S_CMD, C_MSB);
+    w32(SPI3 + S_PAD, 0);
+    u32 c1 = r32(SPI3 + S_CFG1) & ~(0xff00U | 0x3ff0000U);
+    w32(SPI3 + S_CFG1, c1 | ((len - 1) & 0x3ff) << 16);
+    for (u32 i = 0; i < len; i += 4) {
+        u32 w = 0;
+        for (u32 j = 0; j < 4 && i + j < len; j++)
+            w |= (u32)tx[i + j] << (8 * j);
+        w32(SPI3 + S_TX, w);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    w32(SPI3 + S_CMD, C_MSB | C_ACT);
+    u64 end = ticks() + freq() / 100;
+    while (!(r32(SPI3 + S_ST0) & 1))
+        if (ticks() > end) {
+            w32(SPI3 + S_CMD, C_MSB | C_PAUSE);
+            return 0;
+        }
+    if (rx)
+        for (u32 i = 0; i < len; i += 4) {
+            u32 w = r32(SPI3 + S_RX);
+            for (u32 j = 0; j < 4 && i + j < len; j++)
+                rx[i + j] = (u8)(w >> (8 * j));
+        }
+    w32(SPI3 + S_CMD, C_MSB | C_PAUSE);
+    return 1;
+}
+
+static int nvt_page(u32 a)
+{
+    u8 tx[3] = {0xff, (u8)(a >> 15), (u8)(a >> 7)};
+    return spi_xfer(tx, 0, 3);
+}
+
+static int nvt_write1(u32 a, u8 v)
+{
+    if (!nvt_page(a))
+        return 0;
+    u8 tx[2] = {(u8)((a & 0x7f) | 0x80), v};
+    return spi_xfer(tx, 0, 2);
+}
+
+static int nvt_read(u32 a, u8 *out, u32 n)   /* n <= 28 */
+{
+    u8 tx[32], rx[32];
+    for (u32 i = 0; i < 32; i++)
+        tx[i] = rx[i] = 0;
+    if (!nvt_page(a))
+        return 0;
+    tx[0] = (u8)(a & 0x7f);
+    if (!spi_xfer(tx, rx, n + 2))
+        return 0;
+    for (u32 i = 0; i < n; i++)
+        out[i] = rx[2 + i];
+    return 1;
+}
+
+static void touch_spi(void)
+{
+    puts_("TOUCH SPI3\n", GREEN);
+    u32 cg0 = r32(PERAO + 0x10);
+    w32(PERAO + 0x2c, 1U << 14);                   /* ungate peraop_spi3_bclk */
+    u32 cg1 = r32(PERAO + 0x10);
+    u32 m9 = r32(GPIOB + 0x390), m0 = r32(GPIOB + 0x300);
+    kv(" CG", cg0, 8);
+    kv("->", cg1, 8);
+    kv("M9", m9, 8);
+    puts_("\n", WHITE);
+    kv(" CFG0", r32(SPI3 + S_CFG0), 8);
+    kv("1", r32(SPI3 + S_CFG1), 8);
+    kv("2", r32(SPI3 + S_CFG2), 8);
+    puts_("\n", WHITE);
+    kv(" CFG3", r32(SPI3 + S_CFG3), 8);
+    kv("CMD", r32(SPI3 + S_CMD), 8);
+    kv("M0", m0, 8);
+    puts_("\n", WHITE);
+
+    /* Controller first (ruby order), slow clock: sck/cs counts 32 (~0.4-1 MHz). */
+    w32(SPI3 + S_CMD, C_RST);
+    w32(SPI3 + S_CMD, 0);
+    w32(SPI3 + S_PAD, 0);
+    w32(SPI3 + S_CMD, C_MSB);
+    w32(SPI3 + S_CFG2, (31U << 16) | 31U);         /* sck low/high */
+    w32(SPI3 + S_CFG0, (63U << 16) | 63U);         /* cs hold/setup */
+    w32(SPI3 + S_CFG1, (r32(SPI3 + S_CFG1) & ~0xffU) | 63U);
+    w32(SPI3 + S_CMD, C_MSB | C_PAUSE);
+    /* Pins 73-76 -> function 2; TP reset GPIO3 -> GPIO, output, high. */
+    w32(GPIOB + 0x390, (m9 & ~0x000ffff0U) | 0x00022220U);
+    w32(GPIOB + 0x300, m0 & ~0x0000f000U);
+    w32(GPIOB + 0x004, 1U << 3);                   /* DIR set */
+    w32(GPIOB + 0x104, 1U << 3);                   /* DOUT set */
+    delay_us(20000);
+    kv(" M9 NOW", r32(GPIOB + 0x390), 8);
+    puts_("\n", WHITE);
+
+    u8 id[8] = {0};
+    int r0 = nvt_read(NVT_TRIM, id, 6);
+    puts_(" ID0 ", GREEN);
+    kv("OK", r0, 1);
+    for (int i = 0; i < 6; i++)
+        hex(id[i], 2, WHITE), puts_(" ", WHITE);
+    puts_("\n", WHITE);
+    int w = nvt_write1(NVT_SWRST, 0x69);           /* bootloader reset */
+    delay_us(40000);
+    for (int i = 0; i < 8; i++)
+        id[i] = 0;
+    int r1 = nvt_read(NVT_TRIM, id, 6);
+    puts_(" ID1 ", GREEN);
+    kv("W", w, 1);
+    kv("OK", r1, 1);
+    for (int i = 0; i < 6; i++)
+        hex(id[i], 2, WHITE), puts_(" ", WHITE);
+    puts_("\n", WHITE);
+}
+#endif /* TOUCH_SPI */
+
+
+#ifdef TOUCH_FW
+/*
+ * E24: NT36672C flashless firmware download + on-screen touch test.
+ * Chip values from the stock nova_0flash_mmi_v2.ko: trim id 0C xx xx 72 66 03
+ * selects NT36675_memory_map (EVENT_BUF 0x22d00, BOOT_RDY 0x3f10d,
+ * ILM/DLM DES 0x3f128/0x3f12c, LENGTH 0x3f118/0x3f130, G_*_CHECKSUM
+ * 0x3f100/0x3f104, BLD_CRC_EN 0x3f30e) and hw_crc 2. Sequence: Novatek
+ * host-download flow (eng reset 0x5a@0x7fff80, bootloader reset 0x69@0x3f0fe,
+ * SPI_RD_FAST 0x3f310 = 0, SRAM partitions from the bin header, CRC regs,
+ * host cmd 0xae@EVENT+0x50, BOOT_RDY=1, reset state 0xa0-0xaf @EVENT+0x60).
+ * The firmware blob is appended locally ("NVTFWBIN" tag), never committed.
+ */
+#define EVT         0x22d00U
+static u8 fwb(u64 fw, u32 i) { return *(volatile u8 *)(fw + i); }
+static u32 fw32(u64 fw, u32 i)
+{
+    return fwb(fw, i) | (u32)fwb(fw, i + 1) << 8 | (u32)fwb(fw, i + 2) << 16 | (u32)fwb(fw, i + 3) << 24;
+}
+
+static int nvt_write_n(u32 a, const u8 *v, u32 n)   /* n <= 30, within one 128 B page */
+{
+    u8 tx[32];
+    if (!nvt_page(a))
+        return 0;
+    tx[0] = (u8)((a & 0x7f) | 0x80);
+    for (u32 i = 0; i < n; i++)
+        tx[1 + i] = v[i];
+    return spi_xfer(tx, 0, n + 1);
+}
+
+static int nvt_write_le(u32 a, u32 v, u32 n)
+{
+    u8 b[4] = {(u8)v, (u8)(v >> 8), (u8)(v >> 16), (u8)(v >> 24)};
+    return nvt_write_n(a, b, n);
+}
+
+static u32 sram_write(u64 fw, u32 bin, u32 sram, u32 len)
+{
+    u8 buf[30];
+    u32 done = 0, bad = 0;
+    while (done < len) {
+        u32 a = sram + done;
+        u32 n = 128 - (a & 0x7f);
+        if (n > 30)
+            n = 30;
+        if (n > len - done)
+            n = len - done;
+        for (u32 i = 0; i < n; i++)
+            buf[i] = fwb(fw, bin + done + i);
+        if (!nvt_write_n(a, buf, n))
+            bad++;
+        done += n;
+        if ((done & 0xfff) < 30)
+            kick();
+    }
+    return bad;
+}
+
+static u64 find_fw(u64 from)
+{
+    for (u64 a = (from + 0xfff) & ~0xfffUL; a < from + 0x200000; a += 0x1000) {
+        const volatile u8 *m = (const volatile u8 *)a;
+        if (m[0] == 'N' && m[1] == 'V' && m[2] == 'T' && m[3] == 'F' && m[4] == 'W' && m[5] == 'B' &&
+            m[6] == 'I' && m[7] == 'N')
+            return a;
+    }
+    return 0;
+}
+
+static void dot(u32 x, u32 y, u32 c)
+{
+    for (u32 dy = 0; dy < 12; dy++)
+        for (u32 dx = 0; dx < 12; dx++)
+            px(x + dx, y + dy, c, pitch);
+}
+
+extern char _end[];
+
+static void touch_fw(void)
+{
+    u64 tag = find_fw((u64)_end);
+    puts_("TOUCH FW ", GREEN);
+    if (!tag) {
+        puts_("NO BLOB\n", 0xffff0000U);
+        return;
+    }
+    u32 fwsize = r32(tag + 8);
+    u64 fw = tag + 16;
+    u32 hdr = fw32(fw, 0);
+    kv("AT", tag, 9);
+    kv("SZ", fwsize, 6);
+    kv("HDR", hdr, 4);
+    puts_("\n", WHITE);
+
+    nvt_write1(0x7fff80, 0x5a);                    /* eng reset */
+    delay_us(30000);
+    nvt_write1(NVT_SWRST, 0x69);                   /* bootloader reset */
+    delay_us(35000);
+    nvt_write1(0x3f310, 0x00);                     /* SPI_RD_FAST off */
+
+    /* partitions: ILM/DLM 12-byte entries (bin, sram, size) + CRC at 0x18/0x1c,
+     * then 16-byte info entries (sram, size, bin, crc) from 0x30 to hdr. */
+    u32 bad = 0, parts = 0, bytes = 0;
+    u32 ilm_sram = fw32(fw, 4), ilm_size = fw32(fw, 8), ilm_crc = fw32(fw, 0x18);
+    u32 dlm_sram = fw32(fw, 16), dlm_size = fw32(fw, 20), dlm_crc = fw32(fw, 0x1c);
+    for (u32 k = 0; k < 2; k++) {
+        u32 bin = fw32(fw, k * 12), sram = fw32(fw, k * 12 + 4), size = fw32(fw, k * 12 + 8);
+        if (size && bin + size + 1 <= fwsize) {
+            bad += sram_write(fw, bin, sram, size + 1);
+            parts++;
+            bytes += size + 1;
+        }
+    }
+    for (u32 pos = 0x30; pos + 16 <= hdr; pos += 16) {
+        u32 sram = fw32(fw, pos), size = fw32(fw, pos + 4), bin = fw32(fw, pos + 8);
+        if (size && bin + size + 1 <= fwsize) {
+            bad += sram_write(fw, bin, sram, size + 1);
+            parts++;
+            bytes += size + 1;
+        }
+    }
+    puts_(" WROTE ", GREEN);
+    kv("P", parts, 2);
+    kv("B", bytes, 6);
+    kv("ERR", bad, 4);
+    puts_("\n", WHITE);
+
+    nvt_write_le(0x3f118, ilm_size, 3);            /* ILM_LENGTH */
+    nvt_write_le(0x3f128, ilm_sram, 3);            /* ILM_DES */
+    nvt_write_le(0x3f100, ilm_crc, 4);             /* G_ILM_CHECKSUM */
+    nvt_write_le(0x3f130, dlm_size, 3);            /* DLM_LENGTH */
+    nvt_write_le(0x3f12c, dlm_sram, 3);            /* DLM_DES */
+    nvt_write_le(0x3f104, dlm_crc, 4);             /* G_DLM_CHECKSUM */
+    u8 c[2] = {0};
+    nvt_read(0x3f30e, c, 1);
+    nvt_write1(0x3f30e, c[0] | 0x80);              /* BLD_CRC_EN */
+
+    nvt_write1(EVT + 0x60, 0x00);
+    nvt_write1(EVT + 0x50, 0xae);                  /* host cmd: download done */
+    nvt_write1(0x3f10d, 0x01);                     /* BOOT_RDY */
+    delay_us(10000);
+    u8 st[8] = {0};
+    u32 tries = 0;
+    for (; tries < 60; tries++) {
+        nvt_read(EVT + 0x60, st, 6);
+        if (st[0] >= 0xa0 && st[0] <= 0xaf)
+            break;
+        delay_us(10000);
+    }
+    u8 info[16] = {0};
+    nvt_read(EVT + 0x78, info, 16);
+    puts_(" BOOT ", GREEN);
+    kv("ST", st[0], 2);
+    kv("N", tries, 2);
+    kv("VER", info[0], 2);
+    kv("BAR", info[1], 2);
+    puts_("\n", WHITE);
+
+    /* Firmware info (EVT+0x78): ver, ~ver, x_num, y_num, abs_x_max (BE), abs_y_max (BE). */
+    u32 xmax = ((u32)info[4] << 8) | info[5], ymax = ((u32)info[6] << 8) | info[7];
+    puts_(" INFO", GREEN);
+    for (int i = 0; i < 10; i++)
+        puts_(" ", WHITE), hex(info[i], 2, WHITE);
+    puts_("\n", WHITE);
+    if (xmax < 100 || xmax > 20000)
+        xmax = 1080;
+    if (ymax < 100 || ymax > 40000)
+        ymax = 2400;
+
+    /*
+     * 20 s touch test. Layout from the stock nvt_ts_work_func (E25): finger i
+     * at EVT + 6i, id = b0 >> 3, status = b0 & 7 (1/2 = down), x = b1 << 8 | b2,
+     * y = b3 << 8 | b4 (big-endian, 4x panel units, max from INFO). Raw bytes
+     * are shown when they change.
+     */
+    puts_(" TOUCH THE SCREEN (20 S)\n", GREEN);
+    u32 lx = cx, ly = cy;
+    u64 end = ticks() + 20 * freq();
+    u8 last[14] = {0};
+    u32 n = 0;
+    while (ticks() < end) {
+        u8 e[16] = {0};
+        nvt_read(EVT, e, 14);
+        u32 id = e[0] >> 3, sts = e[0] & 7;
+        if (id >= 1 && id <= 10 && (sts == 1 || sts == 2)) {
+            u32 x = ((u32)e[1] << 8) | e[2], y = ((u32)e[3] << 8) | e[4];
+            if (x <= xmax && y <= ymax)
+                dot(x * 1068 / xmax, y * 2388 / ymax, 0xffffff00U);   /* yellow dot */
+        }
+        int diff = 0;
+        for (int i = 0; i < 14; i++)
+            if (e[i] != last[i])
+                diff = 1, last[i] = e[i];
+        if (diff && (n++ & 3) == 0) {
+            cx = lx;
+            cy = ly;
+            puts_(" EV", WHITE);
+            for (int i = 0; i < 12; i++)
+                puts_(" ", WHITE), hex(e[i], 2, WHITE);
+            puts_("  ", WHITE);
+        }
+        kick();
+        delay_us(10000);
+    }
+    cx = 0;
+    cy = ly + 36;
+}
+#endif /* TOUCH_FW */
+
+
+#ifdef KEY_SCAN
+/*
+ * E27: G54 key hardware, read live (no writes except SPMI read commands).
+ *   Volume up:   MTK KPD 0x1c00e000 (DTBO hw-init-map key 0 = 0x73),
+ *                KP_STA 0x00, KP_MEM1 0x04 bit 0 (0 = pressed, ruby).
+ *   Power, volume down: MT6363 PMIC (SPMI slave 4) TOPSTATUS 0x1e, bit 1 =
+ *                pwrkey, bit 3 = homekey (DTBO sw-rstkey 0x72 = VOLUMEDOWN);
+ *                offsets from the stock mtk-pmic-keys.ko mt6363_regs.
+ *   SPMI: PMIF 0x1c804000, SWINF n at 0x800 + 0x40 n: ACC +0, RDATA +0x14,
+ *                VLD_CLR +0x24, STA +0x28 (stock spmi-mtk-pmif.ko table for
+ *                mediatek,mt6855-spmi). The AP owns SWINF 2: the stock driver
+ *                uses regs[25 + 5 * soc_chan] with soc_chan = 2 for MT6855.
+ *                E27 used SWINF 0 (another master's channel) and the phone
+ *                then reset itself during boot; never touch SWINF 0/1/3.
+ *                ACC = opc << 30 | wr << 29 | sid << 24
+ *                | (bytes - 1) << 16 | addr, opc 3 = extended long read;
+ *                STA bits 3:1 = 0 idle, 6 wait-for-valid-clear.
+ */
+#define KPD         0x1c00e000UL
+#define PMIF        0x1c804000UL
+
+static int spmi_rd(u32 ch, u32 sid, u32 addr, u32 *out)
+{
+    u64 b = PMIF + 0x800 + 0x40 * ch;
+    u64 end = ticks() + freq() / 100;
+    while (((r32(b + 0x28) >> 1) & 7) != 0)
+        if (ticks() > end)
+            return -1;
+    w32(b, (3U << 30) | (sid << 24) | (0U << 16) | (addr & 0xffff));
+    end = ticks() + freq() / 100;
+    while (((r32(b + 0x28) >> 1) & 7) != 6)
+        if (ticks() > end)
+            return -2;
+    *out = r32(b + 0x14);
+    w32(b + 0x24, 1);
+    return 0;
+}
+
+static void key_scan(void)
+{
+    puts_("KEYS\n", GREEN);
+    puts_(" SWINF STA", GREEN);
+    for (u32 ch = 0; ch < 4; ch++)
+        puts_(" ", WHITE), hex(r32(PMIF + 0x828 + 0x40 * ch), 4, WHITE);
+    puts_("\n", WHITE);
+    u32 ch = 2, v = 0;                      /* AP channel only (see above) */
+    int rc = spmi_rd(ch, 4, 0x1e, &v);
+    puts_(" PMIC ", GREEN);
+    kv("CH", ch, 1);
+    kv("RC", (u32)rc & 0xff, 2);
+    kv("TOP", v, 8);
+    puts_("\n PRESS POWER, VOL UP, VOL DOWN (BRIEFLY, 25 S)\n", GREEN);
+    u32 lx = cx, ly = cy;
+    u64 end = ticks() + 25 * freq();
+    u32 last_t = 0xffffffffU, last_k = 0xffffffffU;
+    while (ticks() < end) {
+        u32 t = 0;
+        int r = spmi_rd(ch, 4, 0x1e, &t);
+        u32 k = r32(KPD + 0x04);
+        if (t != last_t || k != last_k) {
+            last_t = t;
+            last_k = k;
+            cx = lx;
+            cy = ly;
+            kv(" TOP", r ? 0xeeU : (t & 0xff), 2);
+            puts_(r == 0 && !(t & 2) ? " POWER " : "       ", 0xffffff00U);
+            puts_(r == 0 && !(t & 8) ? "VDOWN " : "      ", 0xffffff00U);
+            kv("KP", k & 0xffff, 4);
+            puts_(!(k & 1) ? " VUP " : "     ", 0xffffff00U);
+            kv("STA", r32(KPD) & 0xffff, 4);
+        }
+        kick();
+        delay_us(20000);
+    }
+    cx = 0;
+    cy = ly + 36;
+}
+#endif /* KEY_SCAN */
+
 static void ufs_diag_fix(void)
 {
     puts_("UFS ", GREEN);
@@ -880,6 +1502,10 @@ static void ufs_diag_fix(void)
     ufs_link_line("    AFTER  ");
     if (up)
         ufs_dev_init();
+#ifdef UFS_HS
+    if (up)
+        ufs_hs();
+#endif
 }
 
 #endif /* UFS_FIX */
@@ -987,6 +1613,12 @@ static const char *load_xnu(u64 pl)
     hex(ba, 9, WHITE);
     puts_("\n", WHITE);
 
+    /* Clear all of LK's VRAM (OVL0 and OVL1 buffers): the probe drew its info
+     * screen into every scanout candidate, and iOS presents only on OVL0 L1,
+     * so the stale OVL1 copy showed through, garbled, after the Apple logo
+     * and whenever iOS turned its layer off (sleep, E28). */
+    if (h.have_fb)
+        fill(&h.fb, BLACK);
     /* XNU has no watchdog driver this early: stop LK's (key 0x22000000,
      * enable bit clear), as ruby's shim does. A hang then stays on screen. */
     w32(WDT_BASE + WDT_MODE, 0x22000000U | (r32(WDT_BASE + WDT_MODE) & 0x7eU));
@@ -1022,7 +1654,67 @@ static void reboot_bootloader(void)
     }
 }
 
-static struct handoff h;
+
+#ifdef LASTLOG_RING
+/*
+ * Previous boot's kernel console, read from RAM before the loader overwrites
+ * it: the sweetlog ring (bsd/dev/sweet_ufs.c sweet_log_ring[4 MiB] and
+ * sweet_log_total) of the kernel that ran last. Physical addresses are
+ * VA - virt_base + phys_base of THAT kernel (build with -D LASTLOG_RING=<pa>
+ * -D LASTLOG_TOTAL=<pa> from llvm-nm). Survives warm resets only; a cold
+ * PMIC reset may leave garbage. Read-only.
+ */
+#ifndef LASTLOG_S
+#define LASTLOG_S 25
+#endif
+#define LASTLOG_SIZE (4UL << 20)
+
+static void last_log(void)
+{
+    u64 total = *(volatile u64 *)(u64)LASTLOG_TOTAL;
+    const volatile u8 *ring = (const volatile u8 *)(u64)LASTLOG_RING;
+    fill(&h.fb, BLACK);
+    sc = 2;
+    cx = cy = 0;
+    puts_("LAST BOOT LOG, TOTAL ", GREEN);
+    hex(total, 10, WHITE);
+    puts_("\n", WHITE);
+    if (total == 0 || total > (1UL << 40)) {
+        puts_("NO VALID RING\n", 0xffff0000U);
+        wait_s(5);
+    } else {
+        /* Walk back from the end until ~120 screen lines (86 columns). */
+        u64 lim = total > LASTLOG_SIZE ? LASTLOG_SIZE : total;
+        u64 back = 0;
+        u32 lines = 0, col = 0;
+        while (back < lim && lines < 120) {
+            u8 ch = ring[(total - 1 - back) % LASTLOG_SIZE];
+            if (ch == '\n') {
+                lines += 1 + col / 86;
+                col = 0;
+            } else {
+                col++;
+            }
+            back++;
+        }
+        for (u64 i = total - back; i < total; i++) {
+            u8 ch = ring[i % LASTLOG_SIZE];
+            if (ch == '\r')
+                continue;
+            putc_((ch == '\n' || (ch >= 32 && ch < 127)) ? (char)ch : '.', WHITE);
+            if ((i & 0x3ff) == 0)
+                kick();
+        }
+        for (int t = 0; t < LASTLOG_S; t++) {
+            kick();
+            wait_s(1);
+        }
+    }
+    sc = SCALE;
+    cx = cy = 0;
+    fill(&h.fb, BLACK);
+}
+#endif /* LASTLOG_RING */
 
 extern char _end[];
 
@@ -1040,6 +1732,11 @@ void probe_main(u64 dtb, u64 pc)
         fill(&h.fb, BLACK);
         find_scanout(&h.fb);
         fb_end = h.fb.base + h.fb.size;
+#ifdef LASTLOG_RING
+        fb_base = cands[0].addr;
+        pitch = cands[0].pitch;
+        last_log();
+#endif
         for (int i = 0; i < ncand; i++) {
             fb_base = cands[i].addr;
             pitch = cands[i].pitch;
@@ -1053,6 +1750,15 @@ void probe_main(u64 dtb, u64 pc)
     u64 pl = find_payload((u64)_end);
 #ifdef UFS_FIX
     ufs_diag_fix();
+#endif
+#ifdef TOUCH_SPI
+    touch_spi();
+#endif
+#ifdef TOUCH_FW
+    touch_fw();
+#endif
+#ifdef KEY_SCAN
+    key_scan();
 #endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);

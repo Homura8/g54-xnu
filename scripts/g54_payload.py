@@ -186,6 +186,9 @@ def build(out_dir, phase1=None, phase2=None, extra_defs=()):
     allowed = ("R_AARCH64_ADR_PREL_PG_HI21", "R_AARCH64_ADD_ABS_LO12_NC",
                "R_AARCH64_CALL26", "R_AARCH64_JUMP26", "R_AARCH64_ADR_PREL_LO21",
                "R_AARCH64_LDST64_ABS_LO12_NC", "R_AARCH64_LDST32_ABS_LO12_NC",
+               # low-12-bit halves of ADRP pairs, as position-independent as the above
+               "R_AARCH64_LDST8_ABS_LO12_NC", "R_AARCH64_LDST16_ABS_LO12_NC",
+               "R_AARCH64_LDST128_ABS_LO12_NC",
                "R_AARCH64_CONDBR19")
     for line in rel.splitlines():
         parts = line.split()

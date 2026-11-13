@@ -68,14 +68,24 @@ def load_topaz(topaz):
 
 
 def build_adt(adt, mkadt, ncpu, ufs=False, d22ap=None):
-    if d22ap:
-        mkadt.D22AP_ADT = d22ap   # /product of the real iPhone X tree (Apple material: keep in out/)
     mkadt.HIGH_PHYS_BASE, mkadt.HIGH_MEM_SIZE = G54["PHYS_BASE"], G54["MEM_SIZE"]
     for k in ("GICD", "GICD_SIZE", "GICR", "GICR_SIZE", "FB", "FB_SIZE", "FB_W", "FB_H",
               "FB_STRIDE", "TIMEBASE", "VTIMER_INTID", "UFS", "UFS_SIZE"):
         setattr(mkadt, k, G54[k])
     seed = hashlib.sha512(b"g54 adt seed").digest()  # reproducible images
-    root = mkadt.build(seed=seed, highmem=True)
+    # Upstream binds D22AP_ADT as a default argument at import time; changing
+    # that constant does not change d22ap_product(). Supply the explicit tree
+    # through a scoped adapter, leaving the pinned upstream checkout untouched.
+    product_loader = mkadt.d22ap_product
+    if d22ap:
+        product_props = product_loader(d22ap)
+        if not product_props:
+            raise SystemExit(f"{d22ap}: no /product properties")
+        mkadt.d22ap_product = lambda: product_props
+    try:
+        root = mkadt.build(seed=seed, highmem=True)
+    finally:
+        mkadt.d22ap_product = product_loader
 
     def name(n):
         return dict((k, v) for k, f, v in n.props).get("name", b"").rstrip(b"\0").decode()
@@ -120,6 +130,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--cpus", type=int, default=1)
     ap.add_argument("--cmdline")
+    ap.add_argument("--touch-fw", help="local Novatek firmware blob (never committed) for probe -D TOUCH_FW")
     ap.add_argument("--d22ap", help="decoded DeviceTree.d22ap (for /product); see docs/status.md")
     ap.add_argument("--ufs", action="store_true",
                     help="describe the UFS host (/sweet-ufs); the driver stays read-only without ufsrw=1")
@@ -139,12 +150,19 @@ def main(argv=None):
                         capture_output=True, text=True, check=True).stdout
     end = next(int(l.split()[0], 16) for l in nm.splitlines() if l.endswith(" _end"))
     stock = open(a.stock, "rb").read()
-    img, pinfo = g54_payload.pack(stock, probe, append=payload, append_at=end)
+    blob = payload
+    if a.touch_fw:
+        fwbytes = open(a.touch_fw, "rb").read()
+        fwsec = b"NVTFWBIN" + struct.pack("<II", len(fwbytes), 0) + fwbytes
+        fwsec += bytes(-len(fwsec) % 0x1000)
+        blob = fwsec + payload          # the probe finds the tag at _end, the payload after it
+        print(f"touch fw {a.touch_fw}: {len(fwbytes)} bytes at raw+{end:#x}, payload at raw+{end + len(fwsec):#x}")
+    img, pinfo = g54_payload.pack(stock, probe, append=blob, append_at=end)
     errs = g54_payload.verify(stock, img, probe)
     if errs:
         raise SystemExit("; ".join(errs))
     raw = g54_payload.gunzip(img[g54_payload.PAGE:g54_payload.PAGE + pinfo["kernel_size"]])
-    if raw[end:end + len(payload)] != payload:
+    if raw[end:end + len(blob)] != blob:
         raise SystemExit("payload not at _end in the packed image")
     open(a.out, "wb").write(img)
     sha = lambda b: hashlib.sha256(b).hexdigest()
