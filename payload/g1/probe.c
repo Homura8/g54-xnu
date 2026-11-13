@@ -820,6 +820,77 @@ static void ufs_dev_init(void)
     w32(UFS + U_IS, r32(UFS + U_IS));
 }
 
+
+#ifdef UFS_HS
+/*
+ * E20: E13/E14 leave the link in PWM slow-auto (peer PA_PWRMODE 0x55), while
+ * LK ran it FAST (E8: 0x11). iOS boot (E15-E18) then takes ~30 min. Restore
+ * HS like Linux ufshcd_change_power_mode(): gear = min(local, peer
+ * PA_MAXRXHSGEAR), rate B, terminations on, all connected lanes, the default
+ * DL timeouts in PA_PWRMODEUSERDATA0-5 and DME_Local*TimeOutVal, then
+ * PA_PWRMODE = FAST/FAST and wait for IS.UPMS; HCS.UPMCRS 1 = PWR_LOCAL.
+ * Attribute IDs: include/ufs/unipro.h. No PMC via FASTAUTO: that MediaTek
+ * path is for HS-G4+.
+ */
+#define IS_UPMS     (1U << 4)
+
+static void ufs_hs(void)
+{
+    u32 lmax = 0, pmax = 0, tx = 0, rx = 0;
+    ufs_uic(0x01, 0x1587U << 16, &lmax);           /* local PA_MAXRXHSGEAR */
+    ufs_uic(0x03, 0x1587U << 16, &pmax);           /* peer PA_MAXRXHSGEAR */
+    ufs_uic(0x01, 0x1561U << 16, &tx);             /* PA_CONNECTEDTXDATALANES */
+    ufs_uic(0x01, 0x1581U << 16, &rx);             /* PA_CONNECTEDRXDATALANES */
+    u32 gear = lmax < pmax ? lmax : pmax;
+    if (gear > 4)
+        gear = 4;
+    puts_("    HS ", GREEN);
+    kv("MAX L", lmax, 1);
+    kv("P", pmax, 1);
+    kv("GEAR", gear, 1);
+    kv("LN", (tx << 4) | rx, 2);
+    puts_("\n", WHITE);
+    if (gear == 0 || tx == 0 || rx == 0)
+        return;
+    u32 bad = 0;
+    bad |= dme_set(0x1568, 0, gear);               /* PA_TXGEAR */
+    bad |= dme_set(0x1583, 0, gear);               /* PA_RXGEAR */
+    bad |= dme_set(0x156a, 0, 2);                  /* PA_HSSERIES = rate B */
+    bad |= dme_set(0x1569, 0, 1);                  /* PA_TXTERMINATION */
+    bad |= dme_set(0x1584, 0, 1);                  /* PA_RXTERMINATION */
+    bad |= dme_set(0x1560, 0, tx);                 /* PA_ACTIVETXDATALANES */
+    bad |= dme_set(0x1580, 0, rx);                 /* PA_ACTIVERXDATALANES */
+    bad |= dme_set(0x15b0, 0, 8191);               /* PA_PWRMODEUSERDATA0..5 */
+    bad |= dme_set(0x15b1, 0, 65535);
+    bad |= dme_set(0x15b2, 0, 32767);
+    bad |= dme_set(0x15b3, 0, 8191);
+    bad |= dme_set(0x15b4, 0, 65535);
+    bad |= dme_set(0x15b5, 0, 32767);
+    bad |= dme_set(0xd041, 0, 8191);               /* DME_Local*TimeOutVal */
+    bad |= dme_set(0xd042, 0, 65535);
+    bad |= dme_set(0xd043, 0, 32767);
+    w32(UFS + U_IS, IS_UPMS);
+    u32 rc = dme_set(0x1571, 0, 0x11);             /* PA_PWRMODE = FAST/FAST */
+    u64 end = ticks() + freq();
+    while (!(r32(UFS + U_IS) & IS_UPMS) && ticks() < end)
+        ;
+    u32 is = r32(UFS + U_IS), upmcrs = (r32(UFS + U_HCS) >> 8) & 7;
+    w32(UFS + U_IS, is);
+    u32 lpm = 0, ppm = 0, g = 0;
+    ufs_uic(0x01, 0x1571U << 16, &lpm);
+    ufs_uic(0x03, 0x1571U << 16, &ppm);
+    ufs_uic(0x01, 0x1568U << 16, &g);
+    puts_("    PMC ", GREEN);
+    kv("SET", bad, 2);
+    kv("RC", rc, 2);
+    kv("UPMCRS", upmcrs, 1);
+    kv("PWR L", lpm, 2);
+    kv("P", ppm, 2);
+    kv("TXG", g, 1);
+    puts_("\n", WHITE);
+}
+#endif /* UFS_HS */
+
 static void ufs_diag_fix(void)
 {
     puts_("UFS ", GREEN);
@@ -880,6 +951,10 @@ static void ufs_diag_fix(void)
     ufs_link_line("    AFTER  ");
     if (up)
         ufs_dev_init();
+#ifdef UFS_HS
+    if (up)
+        ufs_hs();
+#endif
 }
 
 #endif /* UFS_FIX */

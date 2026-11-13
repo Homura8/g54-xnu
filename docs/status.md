@@ -49,6 +49,17 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
+## Latest (13 November 2026 UTC): fast boot to the iOS lock screen
+
+[E20](experiments/2026-11-13-e20-ufs-hs.md) restored UFS HS-G3 (probe
+`-D UFS_HS`) and muted the console over iOS (`sweetfb_noconsole=1`):
+**the iOS 16 lock screen appears in about 2–3 minutes** (E18: 30+ minutes),
+with the clock advancing. There is no input yet (touch, power, volume). Next:
+E21 = E20 + `sweetautoswipe=150000 sweetautoswipeattempts=8
+sweetautoswiperetry=20000` (ruby's synthetic swipe-up) toward the home
+screen, then a G54 touch/key driver. Build E20/E21 with probe
+`out/g1-ufs-hs` (`-D UFS_FIX -D UFS_HS -D LOADER_S=25`).
+
 ## Next concrete steps (13 November 2026 UTC, E18 running)
 
 **Connected resume (12 November UTC / 13 November Melbourne):** read-only
