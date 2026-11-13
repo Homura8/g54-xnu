@@ -389,6 +389,105 @@ static void kv(const char *k, u64 v, int digits)
 
 static void dump_engines(void);
 
+
+#ifdef TOUCH_SCAN
+/*
+ * E22: which touch controller does this unit have? LK merges one dtbo
+ * overlay (panel-specific) into the DTB it passes us. Print every node whose
+ * first compatible looks like a touch IC, with status, name and parent (the
+ * bus), plus /chosen mmi,panel_name.
+ */
+#define TS_MAXD 16
+/* Explicit literals: a pointer table would need absolute relocations. */
+static int ts_match(const volatile u8 *c)
+{
+    return contains(c, "nt36") || contains(c, "novatek") || contains(c, "focaltech") ||
+           contains(c, "fts") || contains(c, "ilitek") || contains(c, "chipone") ||
+           contains(c, "icnl") || contains(c, "goodix") || contains(c, "himax") ||
+           contains(c, "touch");
+}
+
+static void puts_v(const volatile u8 *p, int max, u32 color)
+{
+    for (int i = 0; i < max && p[i]; i++)
+        putc_((char)p[i], color);
+}
+
+static void touch_scan(u64 dtb)
+{
+    const volatile u8 *b = (const volatile u8 *)dtb;
+    if (!dtb || be32(b) != FDT_MAGIC)
+        return;
+    u32 total = be32(b + 4), off_struct = be32(b + 8), off_str = be32(b + 12);
+    const volatile u8 *p = b + off_struct, *end = b + total;
+    static const volatile u8 *name[TS_MAXD], *compat[TS_MAXD], *status[TS_MAXD];
+    static int done[TS_MAXD];   /* .bss: zeroed by entry.S; one scan per buffer */
+    for (int i = 0; i < TS_MAXD; i++) {
+        name[i] = compat[i] = status[i] = 0;
+        done[i] = 1;
+    }
+    int depth = 0, shown = 0;
+    puts_("TOUCH SCAN\n", GREEN);
+    for (u32 guard = 0; guard < 400000U && p + 4 <= end && shown < 12; guard++) {
+        u32 tok = be32(p);
+        p += 4;
+        if (tok == FDT_BEGIN_NODE || tok == FDT_END_NODE) {
+            /* the node at `depth` has all its own properties now */
+            if (depth > 0 && depth < TS_MAXD && !done[depth]) {
+                done[depth] = 1;
+                if (compat[depth] && ts_match(compat[depth])) {
+                    puts_v(compat[depth], 30, WHITE);
+                    puts_(" ", WHITE);
+                    puts_v(status[depth] ? status[depth] : (const volatile u8 *)"(no status)", 9,
+                           status[depth] && streq(status[depth], "okay") ? GREEN : GREY);
+                    puts_("\n  ", WHITE);
+                    puts_v(name[depth], 24, GREY);
+                    puts_(" IN ", GREY);
+                    puts_v(depth > 1 ? name[depth - 1] : (const volatile u8 *)"/", 24, GREY);
+                    puts_("\n", WHITE);
+                    shown++;
+                }
+            }
+            if (tok == FDT_BEGIN_NODE) {
+                depth++;
+                if (depth < TS_MAXD) {
+                    name[depth] = p;
+                    compat[depth] = status[depth] = 0;
+                    done[depth] = 0;
+                }
+                while (p < end && *p)
+                    p++;
+                p = (const volatile u8 *)(((u64)p + 4) & ~3UL);
+            } else {
+                depth--;
+            }
+        } else if (tok == FDT_PROP) {
+            u32 len = be32(p), nameoff = be32(p + 4);
+            p += 8;
+            const volatile u8 *pn = b + off_str + nameoff;
+            if (depth < TS_MAXD && len) {
+                if (streq(pn, "compatible"))
+                    compat[depth] = p;
+                else if (streq(pn, "status"))
+                    status[depth] = p;
+                else if (depth == 2 && streq(pn, "mmi,panel_name")) {
+                    puts_("PANEL ", GREEN);
+                    puts_v(p, 40, WHITE);
+                    puts_("\n", WHITE);
+                }
+            }
+            p += (len + 3) & ~3U;
+        } else if (tok == FDT_NOP) {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if (!shown)
+        puts_("  NO TOUCH NODES\n", GREY);
+}
+#endif /* TOUCH_SCAN */
+
 static void info_screen(const struct handoff *h, u64 pc, int which)
 {
     /* Pitch test: x = 1000 drawn with both candidate pitches. */
@@ -440,6 +539,10 @@ static void info_screen(const struct handoff *h, u64 pc, int which)
         hex(fr[i].size, 9, WHITE);
         puts_(i & 1 ? "\n" : "  ", WHITE);
     }
+#ifdef TOUCH_SCAN
+    puts_("\n", WHITE);
+    touch_scan(h->dtb);
+#else
     puts_("\nRESERVED ", GREEN);
     hex(h->nres, 2, WHITE);
     puts_(" IN ", GREEN);
@@ -453,6 +556,7 @@ static void info_screen(const struct handoff *h, u64 pc, int which)
         if ((i & 7) == 0)
             kick();
     }
+#endif
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
