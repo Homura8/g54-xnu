@@ -57,6 +57,20 @@ Store, Settings, widgets, dock with Phone/Safari/Messages, 4:04). Boot is
 about 3 minutes. Touch is a **Novatek NT36672C flashless TDDI on SPI3** ([E22](experiments/2026-11-13-e22-touch-scan.md)). SPI3 reads its ID ([E23](experiments/2026-11-13-e23-touch-spi.md)); the probe downloads its firmware and reads finger reports ([E24](experiments/2026-11-13-e24-touch-fw.md)); the XNU-side driver is next. Open items: no real input (touch/keys), spontaneous restart
 after a few minutes with no panic text, no log channel. See E21 "Next".
 
+## Open issues (owner list, 13 November 2026 UTC)
+
+Observed on the E21–E24 iOS boots; keep this list current.
+
+| # | Issue | What is known / first idea |
+| --- | --- | --- |
+| 1 | **No touch** in iOS | Chip, firmware download and reports proven in the probe (E23–E25). Kernel patch 0202 (`g54nvt=1`, polled) built in CI, device test next |
+| 2 | **No buttons** (power, volume) | Volume-down is MTK KPD `mediatek,kp` at `0x1c00e000` (key 0); power/volume-up are on the PMIC. Ruby's 0150/0169 key drivers are MT6877/MT6359-specific and off |
+| 3 | **Brief garbled framebuffer after the Apple logo** | The probe's own text in OVL1 layer 0 (`FE0D0000`, pitch 0x1100) is shown at the wrong pitch while iOS takes over (E20). Fix: the probe draws only into the visible OVL0 L1 buffer or clears/disables OVL1 L0 before the jump |
+| 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
+| 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |
+| 6 | **Composition glitches**: red clock, no wallpaper, white dock, blank widgets | May share one cause (owner's suggestion): missing/incorrect blending or colour format in the software compositor (alpha/premultiplied, BGRA vs RGBA, or CoreAnimation falling back without GPU). Compare with ruby's/topaz screenshots and the SweetFramebuffer pixel format before changing anything |
+| 7 | **Spontaneous restart** after a few minutes (E18, E21) | No panic text. Owner, 13 November: it stopped happening when the buttons are left alone, so a key press may have triggered a reset/watchdog path; unconfirmed (could have been fixed by something else). The sweetlog ring at the end of `userdata` could tell; a probe reader is a possible tool |
+
 ## Previous: fast boot to the iOS lock screen
 
 [E20](experiments/2026-11-13-e20-ufs-hs.md) restored UFS HS-G3 (probe
