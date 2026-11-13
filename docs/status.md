@@ -49,7 +49,7 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## Next concrete steps (12 November 2026 UTC, after E14)
+## Next concrete steps (13 November 2026 UTC, E18 running)
 
 **Connected resume (12 November UTC / 13 November Melbourne):** read-only
 Fastboot communication was re-established with the same `cancunf`, XT2343-2,
@@ -109,6 +109,14 @@ algorithm 0x801) into `out/ipsw/d22ap.adt`.
    deadlock is not established and its patch remains unapplied. Storage
    remains in PWM slow-auto mode; loading is still slow, but no measured
    throughput or controlled boot-time improvement is established.
+   Later samples put backboardd in its main event loop and SpringBoard in a
+   synchronous user-cfprefsd preferences wait after Control Center bundle
+   loading. Distorted old probe graphics reappear beneath fresh iOS logs;
+   the same UI PIDs remain. Treat this as a presentation symptom, not a
+   demonstrated reboot. [E19](experiments/2026-11-13-e19-console-isolation.md)
+   is host-verified and **staged only**: it adds `sweetfb_noconsole=1` to
+   isolate the console drawing over iOS frames. Do not interrupt advancing
+   E18 just to run it; repeat live recovery preflight before any future write.
 2. **For root reconstruction only** (E15 is already built and flashed):
    build on the Mac (needs sudo; ~20 GB free):
    `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
