@@ -161,6 +161,7 @@ struct handoff {
     int nmem, nres;
     struct range mem[MAX_MEM], res[MAX_RES];
 };
+static struct handoff h;
 
 static void add(struct range *arr, int *n, int max, u64 base, u64 size)
 {
@@ -338,8 +339,9 @@ static void px(u32 x, u32 y, u32 c, u32 stride)
 }
 
 #define SCALE 4
-#define CW (6 * SCALE)
-#define CH (9 * SCALE)
+static u32 sc = SCALE;          /* glyph scale; the last-log page uses 2 */
+#define CW (6 * sc)
+#define CH (9 * sc)
 static u32 cx, cy;
 
 static void putc_(char ch, u32 color)
@@ -357,9 +359,9 @@ static void putc_(char ch, u32 color)
     for (u32 r = 0; r < 7; r++)
         for (u32 c = 0; c < 5; c++)
             if (g[r] & (0x10 >> c))
-                for (u32 dy = 0; dy < SCALE; dy++)
-                    for (u32 dx = 0; dx < SCALE; dx++)
-                        px(12 + cx + c * SCALE + dx, 12 + cy + r * SCALE + dy, color, pitch);
+                for (u32 dy = 0; dy < sc; dy++)
+                    for (u32 dx = 0; dx < sc; dx++)
+                        px(12 + cx + c * sc + dx, 12 + cy + r * sc + dy, color, pitch);
     cx += CW;
     if (cx + CW > FB_W - 24) {
         cx = 0;
@@ -1611,6 +1613,12 @@ static const char *load_xnu(u64 pl)
     hex(ba, 9, WHITE);
     puts_("\n", WHITE);
 
+    /* Clear all of LK's VRAM (OVL0 and OVL1 buffers): the probe drew its info
+     * screen into every scanout candidate, and iOS presents only on OVL0 L1,
+     * so the stale OVL1 copy showed through, garbled, after the Apple logo
+     * and whenever iOS turned its layer off (sleep, E28). */
+    if (h.have_fb)
+        fill(&h.fb, BLACK);
     /* XNU has no watchdog driver this early: stop LK's (key 0x22000000,
      * enable bit clear), as ruby's shim does. A hang then stays on screen. */
     w32(WDT_BASE + WDT_MODE, 0x22000000U | (r32(WDT_BASE + WDT_MODE) & 0x7eU));
@@ -1646,7 +1654,67 @@ static void reboot_bootloader(void)
     }
 }
 
-static struct handoff h;
+
+#ifdef LASTLOG_RING
+/*
+ * Previous boot's kernel console, read from RAM before the loader overwrites
+ * it: the sweetlog ring (bsd/dev/sweet_ufs.c sweet_log_ring[4 MiB] and
+ * sweet_log_total) of the kernel that ran last. Physical addresses are
+ * VA - virt_base + phys_base of THAT kernel (build with -D LASTLOG_RING=<pa>
+ * -D LASTLOG_TOTAL=<pa> from llvm-nm). Survives warm resets only; a cold
+ * PMIC reset may leave garbage. Read-only.
+ */
+#ifndef LASTLOG_S
+#define LASTLOG_S 25
+#endif
+#define LASTLOG_SIZE (4UL << 20)
+
+static void last_log(void)
+{
+    u64 total = *(volatile u64 *)(u64)LASTLOG_TOTAL;
+    const volatile u8 *ring = (const volatile u8 *)(u64)LASTLOG_RING;
+    fill(&h.fb, BLACK);
+    sc = 2;
+    cx = cy = 0;
+    puts_("LAST BOOT LOG, TOTAL ", GREEN);
+    hex(total, 10, WHITE);
+    puts_("\n", WHITE);
+    if (total == 0 || total > (1UL << 40)) {
+        puts_("NO VALID RING\n", 0xffff0000U);
+        wait_s(5);
+    } else {
+        /* Walk back from the end until ~120 screen lines (86 columns). */
+        u64 lim = total > LASTLOG_SIZE ? LASTLOG_SIZE : total;
+        u64 back = 0;
+        u32 lines = 0, col = 0;
+        while (back < lim && lines < 120) {
+            u8 ch = ring[(total - 1 - back) % LASTLOG_SIZE];
+            if (ch == '\n') {
+                lines += 1 + col / 86;
+                col = 0;
+            } else {
+                col++;
+            }
+            back++;
+        }
+        for (u64 i = total - back; i < total; i++) {
+            u8 ch = ring[i % LASTLOG_SIZE];
+            if (ch == '\r')
+                continue;
+            putc_((ch == '\n' || (ch >= 32 && ch < 127)) ? (char)ch : '.', WHITE);
+            if ((i & 0x3ff) == 0)
+                kick();
+        }
+        for (int t = 0; t < LASTLOG_S; t++) {
+            kick();
+            wait_s(1);
+        }
+    }
+    sc = SCALE;
+    cx = cy = 0;
+    fill(&h.fb, BLACK);
+}
+#endif /* LASTLOG_RING */
 
 extern char _end[];
 
@@ -1664,6 +1732,11 @@ void probe_main(u64 dtb, u64 pc)
         fill(&h.fb, BLACK);
         find_scanout(&h.fb);
         fb_end = h.fb.base + h.fb.size;
+#ifdef LASTLOG_RING
+        fb_base = cands[0].addr;
+        pitch = cands[0].pitch;
+        last_log();
+#endif
         for (int i = 0; i < ncand; i++) {
             fb_base = cands[i].addr;
             pitch = cands[i].pitch;
