@@ -54,7 +54,7 @@ direct kernels.
 [E21](experiments/2026-11-13-e21-home-screen.md): E20 plus ruby's synthetic
 swipe-up reached **SpringBoard's home screen** (owner photo: Photos, App
 Store, Settings, widgets, dock with Phone/Safari/Messages, 4:04). Boot is
-about 3 minutes. Open items: no real input (touch/keys), spontaneous restart
+about 3 minutes. Touch is a **Novatek NT36672C flashless TDDI on SPI3** ([E22](experiments/2026-11-13-e22-touch-scan.md)). Open items: no real input (touch/keys), spontaneous restart
 after a few minutes with no panic text, no log channel. See E21 "Next".
 
 ## Previous: fast boot to the iOS lock screen
