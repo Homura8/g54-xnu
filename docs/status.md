@@ -8,7 +8,7 @@
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
 | **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **done 2026-11-12**: [E15](experiments/2026-11-12-e15-ios-root.md) owner photos show iOS 16.7.16 HFS+ root mounted read-write, real Apple launchd PID 1 and early boot complete |
-| **M5** graphical iOS interface | yes | **First iOS graphics observed in [E18](experiments/2026-11-13-e18-dyld-dof.md): Apple logo, IOSurface 2/3 copied to the panel.** Six A55s verified; wakeup-warning flood suppressed. UI processes advance beyond dyld through input/display setup; lock/home screen and physical touch remain unobserved |
+| **M5** graphical iOS interface | yes | **done 13 November 2026**: [E21](experiments/2026-11-13-e21-home-screen.md) home screen; **[E26](experiments/2026-11-13-e26-ios-touch.md) real touch in iOS** (Novatek NT36672C, firmware downloaded by the probe, kernel 0202 polled driver): unlock, Settings, App Library, app switcher, Control Center, back swipe |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -49,7 +49,18 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 home screen on the G54
+## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 usable by touch on the G54
+
+[E26](experiments/2026-11-13-e26-ios-touch.md): kernel K3 (patch 0202,
+`g54nvt=1`) plus the probe's firmware download gives **real touch in iOS**:
+the owner unlocked the phone and used Settings, the App Library, the app
+switcher and Control Center. Build E26 with probe `out/g1-tfw3` (`-D UFS_FIX
+-D UFS_HS -D TOUCH_SPI -D TOUCH_FW -D NO_RESV -D LOADER_S=8`),
+`--touch-fw <novatek_ts_fw.bin from vendor_dlkm>`, K3 from CI run
+43359626570 and the cmdline in the run card. Remaining problems are in the
+open-issue table below.
+
+## Previous: iOS 16.7.16 home screen on the G54
 
 [E21](experiments/2026-11-13-e21-home-screen.md): E20 plus ruby's synthetic
 swipe-up reached **SpringBoard's home screen** (owner photo: Photos, App
@@ -59,17 +70,21 @@ after a few minutes with no panic text, no log channel. See E21 "Next".
 
 ## Open issues (owner list, 13 November 2026 UTC)
 
-Observed on the E21–E24 iOS boots; keep this list current.
+Observed on the E21–E26 iOS boots; keep this list current.
 
 | # | Issue | What is known / first idea |
 | --- | --- | --- |
-| 1 | **No touch** in iOS | Chip, firmware download and reports proven in the probe (E23–E25). Kernel patch 0202 (`g54nvt=1`, polled) built in CI, device test next |
+| 1 | ~~**No touch** in iOS~~ **fixed in E26** | Polled at 8 ms; no IRQ (EINT22), no firmware reload on chip watchdog (FD/FE reports are only counted), probe-side download only |
 | 2 | **No buttons** (power, volume) | Volume-down is MTK KPD `mediatek,kp` at `0x1c00e000` (key 0); power/volume-up are on the PMIC. Ruby's 0150/0169 key drivers are MT6877/MT6359-specific and off |
 | 3 | **Brief garbled framebuffer after the Apple logo** | The probe's own text in OVL1 layer 0 (`FE0D0000`, pitch 0x1100) is shown at the wrong pitch while iOS takes over (E20). Fix: the probe draws only into the visible OVL0 L1 buffer or clears/disables OVL1 L0 before the jump |
 | 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
 | 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |
 | 6 | **Composition glitches**: red clock, no wallpaper, white dock, blank widgets | May share one cause (owner's suggestion): missing/incorrect blending or colour format in the software compositor (alpha/premultiplied, BGRA vs RGBA, or CoreAnimation falling back without GPU). Compare with ruby's/topaz screenshots and the SweetFramebuffer pixel format before changing anything |
 | 7 | **Spontaneous restart** after a few minutes (E18, E21) | No panic text. Owner, 13 November: it stopped happening when the buttons are left alone, so a key press may have triggered a reset/watchdog path; unconfirmed (could have been fixed by something else). The sweetlog ring at the end of `userdata` could tell; a probe reader is a possible tool |
+| 8 | **~5 fps UI and screen tearing** (E26) | Software presentation path (IOSurface copy to the LK scanout, no vsync/double buffering). Likely related to #6 |
+| 9 | **Settings → General → About does not load** (E26) | Probably a missing service/property (MobileGestalt, baseband, storage); needs logs |
+| 10 | **Blur turns solid white after transitions** in App Library and app switcher; Control Center blur is fine (E26) | Composition: static blur layers cached/rendered differently from animated ones; probably the same root as #6 |
+| 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
 
 ## Previous: fast boot to the iOS lock screen
 
