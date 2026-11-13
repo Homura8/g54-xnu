@@ -3,9 +3,11 @@ G54: polled Novatek NT36672C touch over SPI3 (boot-arg g54nvt=1).
 The g54-xnu probe downloads the flashless firmware before XNU starts
 (g54-xnu docs/experiments E24). This driver maps SPI3 (0x11013000), checks
 the trim ID and reset state, then polls the event buffer 0x22d00 every
-g54nvtms (default 8) ms and feeds up to ten fingers to sweet_hid_touch(),
-scaled from the firmware's abs_x/y_max to 1080x2400. Off by default; no IRQ,
-firmware download or watchdog recovery yet.
+g54nvtms (default 8) ms, checks the report checksum and feeds up to ten
+fingers (big-endian 4x coordinates, stock nvt_ts_work_func layout) to
+sweet_hid_touch(), scaled from the firmware's abs_x/y_max to 1080x2400.
+Off by default; no IRQ, firmware download or watchdog recovery yet.
+
 diff --git a/bsd/conf/files b/bsd/conf/files
 index c604511..f9509b8 100644
 --- a/bsd/conf/files
@@ -20,10 +22,10 @@ index c604511..f9509b8 100644
  bsd/dev/ruby_battery.c			standard
 diff --git a/bsd/dev/g54_nvt_touch.c b/bsd/dev/g54_nvt_touch.c
 new file mode 100644
-index 0000000..9a532e1
+index 0000000..8fb743e
 --- /dev/null
 +++ b/bsd/dev/g54_nvt_touch.c
-@@ -0,0 +1,329 @@
+@@ -0,0 +1,344 @@
 +/*
 + * G54 (Moto G54, MT6855): Novatek NT36672C touch over SPI3, polled.
 + *
@@ -35,8 +37,12 @@ index 0000000..9a532e1
 + *     -> SPI3 0x11013000 FIFO transfers (<= 32 bytes, ruby_spi3.c order)
 + *     -> Novatek event buffer 0x22d00 (NT36675 memory map, chosen by the
 + *        stock driver's trim table for ID 0C xx xx 72 66 03)
-+ *     -> finger i at EVT + 6i: id = b0 >> 3, status = b0 & 7 (1/2 down),
-+ *        x = b1 << 4 | b3 >> 4, y = b2 << 4 | b3 & 0xf
++ *     -> 64-byte report + checksum byte (EVT+64 = -(sum of EVT+0..63));
++ *        finger i at EVT + 6i: id = b0 >> 3, status = b0 & 7 (1/2 down),
++ *        x = b1 << 8 | b2, y = b3 << 8 | b4 (big-endian, 4x panel units:
++ *        abs max 4320 x 9600 from EVT+0x78, E25), pressure b5
++ *        (layout and checksum from the stock nova_0flash_mmi_v2.ko
++ *        nvt_ts_work_func)
 + *     -> sweet_hid_touch(id - 1, down, x * 1080 / xmax, y * 2400 / ymax)
 + *
 + * Pins (GPIO73-76 function 2), reset GPIO3 and the SPI3 clock gate are left
@@ -79,7 +85,7 @@ index 0000000..9a532e1
 +#define NVT_EVT         0x22d00u
 +#define NVT_TRIM        0x3f004u
 +#define NVT_FINGERS     10
-+#define NVT_REPORT      (NVT_FINGERS * 6 + 1)
++#define NVT_REPORT      65      /* 64 data bytes + checksum */
 +#define NVT_CHUNK       28u
 +
 +static struct {
@@ -88,7 +94,7 @@ index 0000000..9a532e1
 +	uint32_t period_ms;
 +	uint32_t page;
 +	bool down[NVT_FINGERS];
-+	uint64_t frames, spi_err, wdt, recovery, touches;
++	uint64_t frames, spi_err, wdt, recovery, touches, bad_sum;
 +	bool started;
 +} nvt;
 +
@@ -222,6 +228,14 @@ index 0000000..9a532e1
 +		return;
 +	}
 +	nvt.frames++;
++	uint8_t sum = 0;
++	for (int i = 0; i < 64; i++) {
++		sum = (uint8_t)(sum + d[i]);
++	}
++	if ((uint8_t)(-sum) != d[64]) {
++		nvt.bad_sum++;
++		return;         /* torn or invalid frame: keep the previous state */
++	}
 +	if (d[0] == 0xfd && d[1] == 0xfd && d[2] == 0xfd) {
 +		if (nvt.wdt++ < 4) {
 +			printf("G54 NVT: chip watchdog report (FD FD FD), no recovery yet\n");
@@ -242,8 +256,11 @@ index 0000000..9a532e1
 +		if (id < 1 || id > NVT_FINGERS || (st != 1 && st != 2)) {
 +			continue;
 +		}
-+		uint32_t x = ((uint32_t)p[1] << 4) | (p[3] >> 4);
-+		uint32_t y = ((uint32_t)p[2] << 4) | (p[3] & 0xf);
++		uint32_t x = ((uint32_t)p[1] << 8) | p[2];
++		uint32_t y = ((uint32_t)p[3] << 8) | p[4];
++		if (x > nvt.xmax || y > nvt.ymax) {
++			continue;
++		}
 +		int f = (int)id - 1;
 +		if (seen[f]) {
 +			continue;
@@ -253,7 +270,7 @@ index 0000000..9a532e1
 +			printf("G54 NVT: finger %d down raw %u,%u\n", f, x, y);
 +		}
 +		nvt.down[f] = true;
-+		sweet_hid_touch(f, 1, (int)(x * 1080 / nvt.xmax), (int)(y * 2400 / nvt.ymax));
++		sweet_hid_touch(f, 1, (int)(x * 1079 / nvt.xmax), (int)(y * 2399 / nvt.ymax));
 +	}
 +	for (int i = 0; i < NVT_FINGERS; i++) {
 +		if (nvt.down[i] && !seen[i]) {
@@ -285,10 +302,10 @@ index 0000000..9a532e1
 +	nvt.xmax = ((uint32_t)info[4] << 8) | info[5];
 +	nvt.ymax = ((uint32_t)info[6] << 8) | info[7];
 +	if (nvt.xmax < 100 || nvt.xmax > 20000) {
-+		nvt.xmax = 1080;
++		nvt.xmax = 4320;
 +	}
 +	if (nvt.ymax < 100 || nvt.ymax > 40000) {
-+		nvt.ymax = 2400;
++		nvt.ymax = 9600;
 +	}
 +	printf("G54 NVT: id %d %02x %02x %02x %02x %02x %02x state %d %02x fw %d %02x/%02x "
 +	    "max %u x %u, poll %u ms\n", r0, id[0], id[1], id[2], id[3], id[4], id[5],
@@ -305,8 +322,8 @@ index 0000000..9a532e1
 +		if (mach_absolute_time() > next_log) {
 +			uint64_t t;
 +			if (next_log) {
-+				printf("G54 NVT: frames %llu touches %llu spi_err %llu wdt %llu rec %llu\n",
-+				    nvt.frames, nvt.touches, nvt.spi_err, nvt.wdt, nvt.recovery);
++				printf("G54 NVT: frames %llu touches %llu spi_err %llu bad_sum %llu wdt %llu rec %llu\n",
++				    nvt.frames, nvt.touches, nvt.spi_err, nvt.bad_sum, nvt.wdt, nvt.recovery);
 +			}
 +			nanoseconds_to_absolutetime(60ull * NSEC_PER_SEC, &t);
 +			next_log = mach_absolute_time() + t;

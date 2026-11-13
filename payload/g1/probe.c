@@ -1321,9 +1321,10 @@ static void touch_fw(void)
         ymax = 2400;
 
     /*
-     * 20 s touch test. Novatek's driver reads point_data[0] = address byte,
-     * then data from EVT+0, and finger i at point_data[1 + 6i]: finger 1 is
-     * EVT+0..5 (E24 parsed from EVT+1). Raw bytes are shown when they change.
+     * 20 s touch test. Layout from the stock nvt_ts_work_func (E25): finger i
+     * at EVT + 6i, id = b0 >> 3, status = b0 & 7 (1/2 = down), x = b1 << 8 | b2,
+     * y = b3 << 8 | b4 (big-endian, 4x panel units, max from INFO). Raw bytes
+     * are shown when they change.
      */
     puts_(" TOUCH THE SCREEN (20 S)\n", GREEN);
     u32 lx = cx, ly = cy;
@@ -1335,8 +1336,9 @@ static void touch_fw(void)
         nvt_read(EVT, e, 14);
         u32 id = e[0] >> 3, sts = e[0] & 7;
         if (id >= 1 && id <= 10 && (sts == 1 || sts == 2)) {
-            u32 x = ((u32)e[1] << 4) | (e[3] >> 4), y = ((u32)e[2] << 4) | (e[3] & 0xf);
-            dot(x * 1080 / xmax, y * 2400 / ymax, 0xffffff00U);   /* yellow dot */
+            u32 x = ((u32)e[1] << 8) | e[2], y = ((u32)e[3] << 8) | e[4];
+            if (x <= xmax && y <= ymax)
+                dot(x * 1068 / xmax, y * 2388 / ymax, 0xffffff00U);   /* yellow dot */
         }
         int diff = 0;
         for (int i = 0; i < 14; i++)
