@@ -130,6 +130,7 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--cpus", type=int, default=1)
     ap.add_argument("--cmdline")
+    ap.add_argument("--touch-fw", help="local Novatek firmware blob (never committed) for probe -D TOUCH_FW")
     ap.add_argument("--d22ap", help="decoded DeviceTree.d22ap (for /product); see docs/status.md")
     ap.add_argument("--ufs", action="store_true",
                     help="describe the UFS host (/sweet-ufs); the driver stays read-only without ufsrw=1")
@@ -149,12 +150,19 @@ def main(argv=None):
                         capture_output=True, text=True, check=True).stdout
     end = next(int(l.split()[0], 16) for l in nm.splitlines() if l.endswith(" _end"))
     stock = open(a.stock, "rb").read()
-    img, pinfo = g54_payload.pack(stock, probe, append=payload, append_at=end)
+    blob = payload
+    if a.touch_fw:
+        fwbytes = open(a.touch_fw, "rb").read()
+        fwsec = b"NVTFWBIN" + struct.pack("<II", len(fwbytes), 0) + fwbytes
+        fwsec += bytes(-len(fwsec) % 0x1000)
+        blob = fwsec + payload          # the probe finds the tag at _end, the payload after it
+        print(f"touch fw {a.touch_fw}: {len(fwbytes)} bytes at raw+{end:#x}, payload at raw+{end + len(fwsec):#x}")
+    img, pinfo = g54_payload.pack(stock, probe, append=blob, append_at=end)
     errs = g54_payload.verify(stock, img, probe)
     if errs:
         raise SystemExit("; ".join(errs))
     raw = g54_payload.gunzip(img[g54_payload.PAGE:g54_payload.PAGE + pinfo["kernel_size"]])
-    if raw[end:end + len(payload)] != payload:
+    if raw[end:end + len(blob)] != blob:
         raise SystemExit("payload not at _end in the packed image")
     open(a.out, "wb").write(img)
     sha = lambda b: hashlib.sha256(b).hexdigest()

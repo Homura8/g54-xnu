@@ -1150,6 +1150,195 @@ static void touch_spi(void)
 }
 #endif /* TOUCH_SPI */
 
+
+#ifdef TOUCH_FW
+/*
+ * E24: NT36672C flashless firmware download + on-screen touch test.
+ * Chip values from the stock nova_0flash_mmi_v2.ko: trim id 0C xx xx 72 66 03
+ * selects NT36675_memory_map (EVENT_BUF 0x22d00, BOOT_RDY 0x3f10d,
+ * ILM/DLM DES 0x3f128/0x3f12c, LENGTH 0x3f118/0x3f130, G_*_CHECKSUM
+ * 0x3f100/0x3f104, BLD_CRC_EN 0x3f30e) and hw_crc 2. Sequence: Novatek
+ * host-download flow (eng reset 0x5a@0x7fff80, bootloader reset 0x69@0x3f0fe,
+ * SPI_RD_FAST 0x3f310 = 0, SRAM partitions from the bin header, CRC regs,
+ * host cmd 0xae@EVENT+0x50, BOOT_RDY=1, reset state 0xa0-0xaf @EVENT+0x60).
+ * The firmware blob is appended locally ("NVTFWBIN" tag), never committed.
+ */
+#define EVT         0x22d00U
+static u8 fwb(u64 fw, u32 i) { return *(volatile u8 *)(fw + i); }
+static u32 fw32(u64 fw, u32 i)
+{
+    return fwb(fw, i) | (u32)fwb(fw, i + 1) << 8 | (u32)fwb(fw, i + 2) << 16 | (u32)fwb(fw, i + 3) << 24;
+}
+
+static int nvt_write_n(u32 a, const u8 *v, u32 n)   /* n <= 30, within one 128 B page */
+{
+    u8 tx[32];
+    if (!nvt_page(a))
+        return 0;
+    tx[0] = (u8)((a & 0x7f) | 0x80);
+    for (u32 i = 0; i < n; i++)
+        tx[1 + i] = v[i];
+    return spi_xfer(tx, 0, n + 1);
+}
+
+static int nvt_write_le(u32 a, u32 v, u32 n)
+{
+    u8 b[4] = {(u8)v, (u8)(v >> 8), (u8)(v >> 16), (u8)(v >> 24)};
+    return nvt_write_n(a, b, n);
+}
+
+static u32 sram_write(u64 fw, u32 bin, u32 sram, u32 len)
+{
+    u8 buf[30];
+    u32 done = 0, bad = 0;
+    while (done < len) {
+        u32 a = sram + done;
+        u32 n = 128 - (a & 0x7f);
+        if (n > 30)
+            n = 30;
+        if (n > len - done)
+            n = len - done;
+        for (u32 i = 0; i < n; i++)
+            buf[i] = fwb(fw, bin + done + i);
+        if (!nvt_write_n(a, buf, n))
+            bad++;
+        done += n;
+        if ((done & 0xfff) < 30)
+            kick();
+    }
+    return bad;
+}
+
+static u64 find_fw(u64 from)
+{
+    for (u64 a = (from + 0xfff) & ~0xfffUL; a < from + 0x200000; a += 0x1000) {
+        const volatile u8 *m = (const volatile u8 *)a;
+        if (m[0] == 'N' && m[1] == 'V' && m[2] == 'T' && m[3] == 'F' && m[4] == 'W' && m[5] == 'B' &&
+            m[6] == 'I' && m[7] == 'N')
+            return a;
+    }
+    return 0;
+}
+
+static void dot(u32 x, u32 y, u32 c)
+{
+    for (u32 dy = 0; dy < 12; dy++)
+        for (u32 dx = 0; dx < 12; dx++)
+            px(x + dx, y + dy, c, pitch);
+}
+
+extern char _end[];
+
+static void touch_fw(void)
+{
+    u64 tag = find_fw((u64)_end);
+    puts_("TOUCH FW ", GREEN);
+    if (!tag) {
+        puts_("NO BLOB\n", 0xffff0000U);
+        return;
+    }
+    u32 fwsize = r32(tag + 8);
+    u64 fw = tag + 16;
+    u32 hdr = fw32(fw, 0);
+    kv("AT", tag, 9);
+    kv("SZ", fwsize, 6);
+    kv("HDR", hdr, 4);
+    puts_("\n", WHITE);
+
+    nvt_write1(0x7fff80, 0x5a);                    /* eng reset */
+    delay_us(30000);
+    nvt_write1(NVT_SWRST, 0x69);                   /* bootloader reset */
+    delay_us(35000);
+    nvt_write1(0x3f310, 0x00);                     /* SPI_RD_FAST off */
+
+    /* partitions: ILM/DLM 12-byte entries (bin, sram, size) + CRC at 0x18/0x1c,
+     * then 16-byte info entries (sram, size, bin, crc) from 0x30 to hdr. */
+    u32 bad = 0, parts = 0, bytes = 0;
+    u32 ilm_sram = fw32(fw, 4), ilm_size = fw32(fw, 8), ilm_crc = fw32(fw, 0x18);
+    u32 dlm_sram = fw32(fw, 16), dlm_size = fw32(fw, 20), dlm_crc = fw32(fw, 0x1c);
+    for (u32 k = 0; k < 2; k++) {
+        u32 bin = fw32(fw, k * 12), sram = fw32(fw, k * 12 + 4), size = fw32(fw, k * 12 + 8);
+        if (size && bin + size + 1 <= fwsize) {
+            bad += sram_write(fw, bin, sram, size + 1);
+            parts++;
+            bytes += size + 1;
+        }
+    }
+    for (u32 pos = 0x30; pos + 16 <= hdr; pos += 16) {
+        u32 sram = fw32(fw, pos), size = fw32(fw, pos + 4), bin = fw32(fw, pos + 8);
+        if (size && bin + size + 1 <= fwsize) {
+            bad += sram_write(fw, bin, sram, size + 1);
+            parts++;
+            bytes += size + 1;
+        }
+    }
+    puts_(" WROTE ", GREEN);
+    kv("P", parts, 2);
+    kv("B", bytes, 6);
+    kv("ERR", bad, 4);
+    puts_("\n", WHITE);
+
+    nvt_write_le(0x3f118, ilm_size, 3);            /* ILM_LENGTH */
+    nvt_write_le(0x3f128, ilm_sram, 3);            /* ILM_DES */
+    nvt_write_le(0x3f100, ilm_crc, 4);             /* G_ILM_CHECKSUM */
+    nvt_write_le(0x3f130, dlm_size, 3);            /* DLM_LENGTH */
+    nvt_write_le(0x3f12c, dlm_sram, 3);            /* DLM_DES */
+    nvt_write_le(0x3f104, dlm_crc, 4);             /* G_DLM_CHECKSUM */
+    u8 c[2] = {0};
+    nvt_read(0x3f30e, c, 1);
+    nvt_write1(0x3f30e, c[0] | 0x80);              /* BLD_CRC_EN */
+
+    nvt_write1(EVT + 0x60, 0x00);
+    nvt_write1(EVT + 0x50, 0xae);                  /* host cmd: download done */
+    nvt_write1(0x3f10d, 0x01);                     /* BOOT_RDY */
+    delay_us(10000);
+    u8 st[8] = {0};
+    u32 tries = 0;
+    for (; tries < 60; tries++) {
+        nvt_read(EVT + 0x60, st, 6);
+        if (st[0] >= 0xa0 && st[0] <= 0xaf)
+            break;
+        delay_us(10000);
+    }
+    u8 info[16] = {0};
+    nvt_read(EVT + 0x78, info, 16);
+    puts_(" BOOT ", GREEN);
+    kv("ST", st[0], 2);
+    kv("N", tries, 2);
+    kv("VER", info[0], 2);
+    kv("BAR", info[1], 2);
+    puts_("\n", WHITE);
+
+    /* 15 s touch test: finger 1 = bytes 1..6 of the event buffer. */
+    puts_(" TOUCH THE SCREEN (15 S)\n", GREEN);
+    u32 lx = cx, ly = cy;
+    u64 end = ticks() + 15 * freq();
+    u32 n = 0;
+    while (ticks() < end) {
+        u8 e[8] = {0};
+        nvt_read(EVT, e, 7);
+        u32 id = e[1] >> 3, sts = e[1] & 7;
+        if (id >= 1 && id <= 10 && (sts == 1 || sts == 2)) {
+            u32 x = ((u32)e[2] << 4) | (e[4] >> 4), y = ((u32)e[3] << 4) | (e[4] & 0xf);
+            dot(x, y, 0xffffff00U);                /* yellow dot where touched */
+            if ((n++ & 15) == 0) {
+                cx = lx;
+                cy = ly;
+                puts_(" ", WHITE);
+                kv("ID", id, 1);
+                kv("X", x, 4);
+                kv("Y", y, 4);
+                puts_("   ", WHITE);
+            }
+        }
+        kick();
+        delay_us(16000);
+    }
+    cx = 0;
+    cy = ly + 36;
+}
+#endif /* TOUCH_FW */
+
 static void ufs_diag_fix(void)
 {
     puts_("UFS ", GREEN);
@@ -1390,6 +1579,9 @@ void probe_main(u64 dtb, u64 pc)
 #endif
 #ifdef TOUCH_SPI
     touch_spi();
+#endif
+#ifdef TOUCH_FW
+    touch_fw();
 #endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);
