@@ -59,7 +59,14 @@ probe `out/g1-lastlog` (touch firmware download + dot test, VRAM clear
 before the jump, **LASTLOG page**). The gated CI run 43364654526 (`00ace74`,
 same code as K4, 0203 hooks moved) passed. PR #7 is open, not merged.
 
-**Running experiment (E29):** each boot first shows "LAST BOOT LOG" for 25 s:
+**E29 result ([run card](experiments/2026-11-13-e29-lastlog.md)):** the LASTLOG
+page works; Power + Volume Down is a warm reset (clean log), but the
+**press-linked spontaneous reset is a cold PMIC power cycle** (the previous
+log came back bit-decayed). Next: read the MT6363 long-press/power-off and
+key-interrupt registers through SWINF 2 and compare with what Android's
+`mtk-pmic-keys` sets up. Also seen: `bluetoothd`/`fairplayd.h2` relaunch loop.
+
+**How E29 works:** each boot first shows "LAST BOOT LOG" for 25 s:
 the tail of the *previous* boot's kernel console, read from RAM
 (`sweet_log_ring` PA `0x141c765f8`, `sweet_log_total` PA `0x141c765f0`, valid
 for K4 only; recompute with `llvm-nm` + `PA = VA - 0xfffffe0006000000 +
@@ -85,7 +92,7 @@ is big-endian 16-bit x/y in 4320×9600 units with a checksum (stock
 `nvt_ts_work_func`). Stock module disassembly (`out/vb/rd/lib/modules`,
 `out/dlkm`) answered every register question faster than guessing.
 
-**Next, in order:** (1) E29 result → cause of the press-linked reset;
+**Next, in order:** (1) MT6363 key/long-press registers → cause of the press-linked cold reset;
 (2) composition/fps issues (#6, #8, #10); (3) RTC, battery, backlight.
 
 ## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 usable by touch and keys on the G54
@@ -119,7 +126,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
 | 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |
 | 6 | **Composition glitches**: red clock, no wallpaper, white dock, blank widgets | May share one cause (owner's suggestion): missing/incorrect blending or colour format in the software compositor (alpha/premultiplied, BGRA vs RGBA, or CoreAnimation falling back without GPU). Compare with ruby's/topaz screenshots and the SweetFramebuffer pixel format before changing anything |
-| 7 | **Spontaneous restart** after a few minutes (E18, E21) | **Linked to button presses** (E27: same image reset after presses, booted cleanly without; owner saw the same on E18/E21). The reset is below XNU (normal boot, not the loader's Fastboot route). Suspect the MT6363 key long-press/interrupt state (stock regs 0x90f, 0xa0e, 0xa0f); **E28: still resets after presses with the kernel driver on SWINF 2**, so not our channel. E29's probe shows the previous boot's kernel console from RAM (`LASTLOG`) to see what happened before the reset |
+| 7 | **Spontaneous restart** after a few minutes (E18, E21) | **Linked to button presses** (E27: same image reset after presses, booted cleanly without; owner saw the same on E18/E21). The reset is below XNU (normal boot, not the loader's Fastboot route). Suspect the MT6363 key long-press/interrupt state (stock regs 0x90f, 0xa0e, 0xa0f); **E28: still resets after presses with the kernel driver on SWINF 2**, so not our channel. E29's probe shows the previous boot's kernel console from RAM (`LASTLOG`) to see what happened before the reset **E29: it is a cold PMIC power cycle** (previous-boot RAM log bit-decayed; warm resets keep it clean) |
 | 8 | **~5 fps UI and screen tearing** (E26) | Software presentation path (IOSurface copy to the LK scanout, no vsync/double buffering). Likely related to #6 |
 | 9 | **Settings → General → About does not load** (E26) | Probably a missing service/property (MobileGestalt, baseband, storage); needs logs |
 | 10 | **Blur turns solid white after transitions** in App Library and app switcher; Control Center blur is fine (E26) | Composition: static blur layers cached/rendered differently from animated ones; probably the same root as #6 |
