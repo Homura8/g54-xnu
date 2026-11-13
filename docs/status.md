@@ -8,7 +8,7 @@
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
 | **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **done 2026-11-12**: [E15](experiments/2026-11-12-e15-ios-root.md) owner photos show iOS 16.7.16 HFS+ root mounted read-write, real Apple launchd PID 1 and early boot complete |
-| **M5** graphical iOS interface | yes | [E16](experiments/2026-11-12-e16-six-a55.md): six A55s verified; SpringBoard/backboardd sampled in dyld's section scan, no GUI. [E17](experiments/2026-11-12-e17-wakeup-monitor.md) running: disable default wakeup reports to isolate their overhead |
+| **M5** graphical iOS interface | yes | [E16](experiments/2026-11-12-e16-six-a55.md): six A55s verified. [E17](experiments/2026-11-12-e17-wakeup-monitor.md): warning flood gone, still slow, repeated fairplayd.H2/bluetoothd launches, no GUI. [E18](experiments/2026-11-13-e18-dyld-dof.md) running: disable the DTrace scan sampled in E16 |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -79,7 +79,7 @@ The first iOS-root test was rebooted at 17:58:35 UTC. Owner photos confirm
 the writable HFS+ root, real launchd, early boot complete and `exec SpringBoard`,
 with no GUI. See [E15](experiments/2026-11-12-e15-ios-root.md).
 
-**Current phone state:** unlocked, 5-8-6, slot A, `boot_a` = the E17 six-A55 XNU
+**Current phone state:** unlocked, 5-8-6, slot A, `boot_a` = the E18 six-A55 XNU
 image; `userdata` holds the iOS root. Android restoration requires stock
 `boot.img` and a userdata reset. Latest kernel: K2 = 0200+0201, CI run
 43265320296. Rebuild every input with `docs/hardware-loop.md` §3b. The decoded
@@ -87,14 +87,22 @@ D22AP tree is made by extracting `Firmware/all_flash/DeviceTree.d22ap.im4p`
 from the IPSW and LZFSE-decoding its IM4P payload (macOS `libcompression`,
 algorithm 0x801) into `out/ipsw/d22ap.adt`.
 
-1. **Observe E17 before another reboot.** Six A55s are verified in E16;
-   owner photos show both UI processes still in dyld's DTrace section scan.
-   Those stacks do not identify the known upstream ICL/MobileGestalt deadlock.
-   E17 adds only `task_wakeups_monitor_rate=0` to isolate the notification
-   flood (`MACH_SEND_TIMED_OUT`). It was rebooted at 18:27:53 UTC; outcome
-   pending. Capture the `SMP SpringBoard` / `SMP backboardd` blocks if no GUI
-   appears. Storage remains in PWM slow-auto mode; test a bounded link-speed
-   change separately if loading remains slow.
+1. **Observe E18 before another reboot.** E17 removed the observed wakeup
+   warning flood, but the owner still reports slow boot and no GUI; the latest
+   photograph shows repeated fairplayd.H2/bluetoothd launches, without exit
+   reasons. E18 is staged at `out/g4/e18-nodof-boot.img`, SHA-256
+   `441c222b62e82ac99d40fd708a8f46383f9a180f025b7f2389854bea257f696b`.
+   It adds only `dtrace_dof_mode=0` to E17. Live Fastboot preflight reverified
+   5-8-6/slot A/no pending merge; flash succeeded and reboot was issued at
+   **01:40:39 UTC, 13 November 2026**. Apple's XNU source defines mode 0
+   as never loading DOF and enables the dyld commpage flag for the macOS
+   default, whereas iOS defaults to mode 0. Dyld checks that flag before the
+   scan seen in E16's UI-process samples. This avoids a sampled startup path;
+   its boot result is pending. The E16 stacks do not
+   identify the known upstream ICL/MobileGestalt deadlock. Capture new
+   `SMP SpringBoard` / `SMP backboardd` blocks if no GUI appears. Storage
+   remains in PWM slow-auto mode; test a bounded link-speed change separately
+   if loading remains slow.
 2. **For root reconstruction only** (E15 is already built and flashed):
    build on the Mac (needs sudo; ~20 GB free):
    `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
@@ -112,7 +120,8 @@ algorithm 0x801) into `out/ipsw/d22ap.adt`.
    out/ipsw/d22ap.adt`, kernel K2 (CI run 43265320296), cmdline as topaz:
    `debug=0xc serial=3 cpus=6 keepsyms=1 -noprogress rd=ufsroot0
    ufsrw=1 rootrw=1 launchd_unsecure_cache=1 unentitled_ios_sim_launch=1
-   ignition_level=1 wdt=-1 wdt_test=no_user_checkin g54panicreset=45`.
+   ignition_level=1 wdt=-1 wdt_test=no_user_checkin g54panicreset=45
+   task_wakeups_monitor_rate=0` (E17; E18 also adds `dtrace_dof_mode=0`).
    Use `cpus=1` to reproduce E15 or isolate an SMP regression.
 4. Then: UFS HS gear, USB log channel (ruby `ruby_usb`), input.
 

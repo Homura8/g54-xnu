@@ -31,12 +31,24 @@ patch or root-image modification is needed for this experiment.
 send and write in **1.845 s**. Reboot issued at **18:27:53 UTC,
 12 November 2026**; `fastboot reboot` returned OKAY.
 
-**Boot outcome pending.** Observe whether the CPU-wakeup warning flood
-disappears, whether launchd/UI startup advances, and where the periodic
-SpringBoard/backboardd samples land. Preserve the distinction between
-warning suppression and reaching a graphical interface. Warm-root state
-still prevents attributing an elapsed-time difference solely to this flag.
+**Owner observation, 13 November UTC:** the CPU-wakeup warning flood appears
+gone, but boot remained very slow and no GUI was reported. The owner left
+the phone running while asleep, so there is no measured boot duration.
+The supplied photograph shows many alternating `exec fairplayd.H2`,
+`exec xpcproxy` and `exec bluetoothd` lines. That is consistent with repeated
+service exits/restarts, but the photo contains no exit status or crash reason
+and does not establish that SpringBoard itself is restarting. The visible
+AppleKeyStore call from ospredictiond returns success (`0x0`).
+
+E17 therefore suppresses the observed warning flood without resolving the
+slow boot or producing an observed interface. No new UI-process sample was
+captured in this photograph. Warm-root state still prevents attributing an
+elapsed-time difference solely to this flag.
+
+Next: [E18](2026-11-13-e18-dyld-dof.md) retains warning suppression and
+disables dyld's DTrace section scan using an existing kernel argument.
 
 Rollback: flash E16's image (removes only this argument), or the matched
-stock boot image. Android additionally needs userdata reset. This test
-writes no userdata, slot metadata or critical partition.
+stock boot image. Android additionally needs userdata reset. Only `boot_a`
+was flashed; iOS continues to write its root during execution. No slot
+metadata or critical partition was changed.
