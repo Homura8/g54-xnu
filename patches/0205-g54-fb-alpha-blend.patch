@@ -1,0 +1,76 @@
+G54: alpha-blend framebuffer layers above the first (boot-arg sweetfb_blend).
+
+SweetFramebuffer copied every enabled layer opaquely, so translucent layers
+(dock, blur backdrops, widgets) replaced what was under them: no wallpaper,
+a white dock and blur that turned solid white after transitions on the G54.
+The first drawn layer is still copied; later layers are blended source-over
+as premultiplied BGRA. sweetfb_blend=0 restores the old copy.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 3a23122..066b411 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -310,10 +310,42 @@ AppleCLCD::swap(const uint8_t *rec)
+ 	}
+ }
+ 
++/*
++ * G54: source-over blend of one premultiplied BGRA row onto the panel row
++ * (dst = src + dst * (255 - a) / 256 per channel; a = 255 copies, a = 0
++ * keeps dst). Layers above the first were copied opaquely, which replaced
++ * the wallpaper and backdrops under translucent layers (no wallpaper, white
++ * dock, blur turning white: g54-xnu status issues #6/#10).
++ */
++static void
++sweet_fb_blend_row(uint32_t *dst, const uint32_t *src, int32_t w)
++{
++	for (int32_t x = 0; x < w; x++) {
++		uint32_t sp = src[x], a = sp >> 24;
++		if (a == 255) {
++			dst[x] = sp;
++		} else if (a != 0) {
++			uint32_t dp = dst[x], k = 255 - a;
++			uint32_t rb = ((dp & 0x00ff00ffu) * k >> 8) & 0x00ff00ffu;
++			uint32_t ag = (((dp >> 8) & 0x00ff00ffu) * k) & 0xff00ff00u;
++			dst[x] = sp + (rb | ag);
++		}
++	}
++}
++
++static int sweet_fb_blend = -1;
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+ 	uint32_t mask = get32(rec, 0x104);
++	bool drawn = false;     /* the first drawn layer is copied, later ones blended */
++
++	if (sweet_fb_blend < 0) {
++		int v = 1;
++		PE_parse_boot_argn("sweetfb_blend", &v, sizeof(v));
++		sweet_fb_blend = v != 0;
++	}
+ 
+ 
+ 	if (!fConsolePaused) {
+@@ -398,11 +430,17 @@ AppleCLCD::present(const uint8_t *rec)
+ 			    (uint64_t)sy * s->bytesPerRow + (uint64_t)sx * 4);
+ 			const uint32_t *srccp = (const uint32_t *)(src + s->offset +
+ 			    (uint64_t)(s->height / 2) * s->bytesPerRow + (uint64_t)(s->width / 2) * 4);
++			bool blend = drawn && sweet_fb_blend;
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+-				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+-				    (size_t)w * 4);
++				void *drow = (void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4);
++				const void *srow = (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4);
++				if (blend) {
++					sweet_fb_blend_row((uint32_t *)drow, (const uint32_t *)srow, w);
++				} else {
++					memcpy(drow, srow, (size_t)w * 4);
++				}
+ 			}
++			drawn = true;
+ 			/* ruby: the DSI scanout reads DRAM; flush the CPU copy to it. */
+ 			flush_dcache64((addr64_t)(fPixels + (uint64_t)dy * fRowBytes + (uint64_t)dx * 4),
+ 			    (uint32_t)((uint64_t)h * fRowBytes), FALSE);
