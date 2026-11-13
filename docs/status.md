@@ -8,7 +8,7 @@
 | **M1** device facts and safety baseline | read-only first | **done for 5-8-6** (2026-11-12 UTC): post-OTA firmware, slot, AVB chain, LK framebuffer/watchdog sources and a cryptographically matched stock `boot.img` recorded in [device-facts.md](device-facts.md) |
 | **M3** first observable execution: LK runs our code (panel colour), then XNU's early framebuffer mark | yes, controlled experiment | **done 2026-11-12**: [E1](experiments/2026-11-12-e1-g1-probe.md) LK runs our probe; [E2](experiments/2026-11-12-e2-psci-reset.md) unattended return to Fastboot; [E4](experiments/2026-11-12-e3-e4-handoff-screen.md) scanout `0xfeac6000`/4320; **[E5](experiments/2026-11-12-e5-xnu-first-boot.md) XNU boots on the G54**: GIC, SGI, VM, IOKit platform expert, AppleCLCD on the panel |
 | **M4** storage and root: UFS from XNU, iOS root mounted, launchd | yes | **done 2026-11-12**: [E15](experiments/2026-11-12-e15-ios-root.md) owner photos show iOS 16.7.16 HFS+ root mounted read-write, real Apple launchd PID 1 and early boot complete |
-| **M5** graphical iOS interface | yes | [E16](experiments/2026-11-12-e16-six-a55.md): six A55s verified. [E17](experiments/2026-11-12-e17-wakeup-monitor.md): warning flood gone, still slow, repeated fairplayd.H2/bluetoothd launches, no GUI. [E18](experiments/2026-11-13-e18-dyld-dof.md) running: disable the DTrace scan sampled in E16 |
+| **M5** graphical iOS interface | yes | **First iOS graphics observed in [E18](experiments/2026-11-13-e18-dyld-dof.md): Apple logo, IOSurface 2/3 copied to the panel.** Six A55s verified; wakeup-warning flood suppressed. UI processes advance beyond dyld through input/display setup; lock/home screen and physical touch remain unobserved |
 
 Success criteria for M3, borrowed from ruby's proven ladder: (1) LK accepts
 the image and a tiny payload paints the panel; (2) the kernel's stage-0 band
@@ -87,22 +87,28 @@ D22AP tree is made by extracting `Firmware/all_flash/DeviceTree.d22ap.im4p`
 from the IPSW and LZFSE-decoding its IM4P payload (macOS `libcompression`,
 algorithm 0x801) into `out/ipsw/d22ap.adt`.
 
-1. **Observe E18 before another reboot.** E17 removed the observed wakeup
-   warning flood, but the owner still reports slow boot and no GUI; the latest
-   photograph shows repeated fairplayd.H2/bluetoothd launches, without exit
-   reasons. E18 is staged at `out/g4/e18-nodof-boot.img`, SHA-256
+1. **Preserve the progressing E18 boot.** The owner has now photographed an
+   Apple logo and framebuffer copies of IOSurfaces 2/3 to `0xfeac6000`.
+   This confirms first graphical iOS output, not yet a lock/home screen.
+   E18 is running from `out/g4/e18-nodof-boot.img`, SHA-256
    `441c222b62e82ac99d40fd708a8f46383f9a180f025b7f2389854bea257f696b`.
    It adds only `dtrace_dof_mode=0` to E17. Live Fastboot preflight reverified
    5-8-6/slot A/no pending merge; flash succeeded and reboot was issued at
    **01:40:39 UTC, 13 November 2026**. Apple's XNU source defines mode 0
    as never loading DOF and enables the dyld commpage flag for the macOS
    default, whereas iOS defaults to mode 0. Dyld checks that flag before the
-   scan seen in E16's UI-process samples. This avoids a sampled startup path;
-   its boot result is pending. The E16 stacks do not
-   identify the known upstream ICL/MobileGestalt deadlock. Capture new
-   `SMP SpringBoard` / `SMP backboardd` blocks if no GUI appears. Storage
-   remains in PWM slow-auto mode; test a bounded link-speed change separately
-   if loading remains slow.
+   scan seen in E16's UI-process samples. E18 samples show the same UI PIDs
+   advancing through libobjc initialization, backboardd's main entry,
+   SweetHIDTouch open, ProgressUI resource loading, and then SpringBoard's
+   system-service/Control Center initialization. Rapid `IOAcceleratorES`
+   lookups returning zero preceded the logo and do not prove a restart or
+   a required GPU driver. Keep observing the logo/ProgressUI transition and
+   later UI samples; do not reboot while it advances. A driverkitd kill is
+   decoded as Jetsam's **per-process memory limit**, not global exhaustion
+   or a captured UI-process kill. The known upstream ICL/MobileGestalt
+   deadlock is not established and its patch remains unapplied. Storage
+   remains in PWM slow-auto mode; loading is still slow, but no measured
+   throughput or controlled boot-time improvement is established.
 2. **For root reconstruction only** (E15 is already built and flashed):
    build on the Mac (needs sudo; ~20 GB free):
    `sudo bash scripts/mkiosroot-macos.sh ~/Downloads/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw out/topaz out/root/ios16-root.img 16g`
