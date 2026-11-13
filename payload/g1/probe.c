@@ -1360,6 +1360,87 @@ static void touch_fw(void)
 }
 #endif /* TOUCH_FW */
 
+
+#ifdef KEY_SCAN
+/*
+ * E27: G54 key hardware, read live (no writes except SPMI read commands).
+ *   Volume up:   MTK KPD 0x1c00e000 (DTBO hw-init-map key 0 = 0x73),
+ *                KP_STA 0x00, KP_MEM1 0x04 bit 0 (0 = pressed, ruby).
+ *   Power, volume down: MT6363 PMIC (SPMI slave 4) TOPSTATUS 0x1e, bit 1 =
+ *                pwrkey, bit 3 = homekey (DTBO sw-rstkey 0x72 = VOLUMEDOWN);
+ *                offsets from the stock mtk-pmic-keys.ko mt6363_regs.
+ *   SPMI: PMIF 0x1c804000, SWINF n at 0x800 + 0x40 n: ACC +0, RDATA +0x14,
+ *                VLD_CLR +0x24, STA +0x28 (stock spmi-mtk-pmif.ko table for
+ *                mediatek,mt6855-spmi); ACC = opc << 30 | wr << 29 | sid << 24
+ *                | (bytes - 1) << 16 | addr, opc 3 = extended long read;
+ *                STA bits 3:1 = 0 idle, 6 wait-for-valid-clear.
+ */
+#define KPD         0x1c00e000UL
+#define PMIF        0x1c804000UL
+
+static int spmi_rd(u32 ch, u32 sid, u32 addr, u32 *out)
+{
+    u64 b = PMIF + 0x800 + 0x40 * ch;
+    u64 end = ticks() + freq() / 100;
+    while (((r32(b + 0x28) >> 1) & 7) != 0)
+        if (ticks() > end)
+            return -1;
+    w32(b, (3U << 30) | (sid << 24) | (0U << 16) | (addr & 0xffff));
+    end = ticks() + freq() / 100;
+    while (((r32(b + 0x28) >> 1) & 7) != 6)
+        if (ticks() > end)
+            return -2;
+    *out = r32(b + 0x14);
+    w32(b + 0x24, 1);
+    return 0;
+}
+
+static void key_scan(void)
+{
+    puts_("KEYS\n", GREEN);
+    puts_(" SWINF STA", GREEN);
+    for (u32 ch = 0; ch < 4; ch++)
+        puts_(" ", WHITE), hex(r32(PMIF + 0x828 + 0x40 * ch), 4, WHITE);
+    puts_("\n", WHITE);
+    u32 ch = 0, v = 0;
+    int rc = -9;
+    for (ch = 0; ch < 4; ch++) {
+        rc = spmi_rd(ch, 4, 0x1e, &v);
+        if (rc == 0)
+            break;
+    }
+    puts_(" PMIC ", GREEN);
+    kv("CH", ch, 1);
+    kv("RC", (u32)rc & 0xff, 2);
+    kv("TOP", v, 8);
+    puts_("\n PRESS POWER, VOL UP, VOL DOWN (BRIEFLY, 25 S)\n", GREEN);
+    u32 lx = cx, ly = cy;
+    u64 end = ticks() + 25 * freq();
+    u32 last_t = 0xffffffffU, last_k = 0xffffffffU;
+    while (ticks() < end) {
+        u32 t = 0;
+        int r = (ch < 4) ? spmi_rd(ch, 4, 0x1e, &t) : -9;
+        u32 k = r32(KPD + 0x04);
+        if (t != last_t || k != last_k) {
+            last_t = t;
+            last_k = k;
+            cx = lx;
+            cy = ly;
+            kv(" TOP", r ? 0xeeU : (t & 0xff), 2);
+            puts_(r == 0 && !(t & 2) ? " POWER " : "       ", 0xffffff00U);
+            puts_(r == 0 && !(t & 8) ? "VDOWN " : "      ", 0xffffff00U);
+            kv("KP", k & 0xffff, 4);
+            puts_(!(k & 1) ? " VUP " : "     ", 0xffffff00U);
+            kv("STA", r32(KPD) & 0xffff, 4);
+        }
+        kick();
+        delay_us(20000);
+    }
+    cx = 0;
+    cy = ly + 36;
+}
+#endif /* KEY_SCAN */
+
 static void ufs_diag_fix(void)
 {
     puts_("UFS ", GREEN);
@@ -1603,6 +1684,9 @@ void probe_main(u64 dtb, u64 pc)
 #endif
 #ifdef TOUCH_FW
     touch_fw();
+#endif
+#ifdef KEY_SCAN
+    key_scan();
 #endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);
