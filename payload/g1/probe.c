@@ -1371,7 +1371,11 @@ static void touch_fw(void)
  *                offsets from the stock mtk-pmic-keys.ko mt6363_regs.
  *   SPMI: PMIF 0x1c804000, SWINF n at 0x800 + 0x40 n: ACC +0, RDATA +0x14,
  *                VLD_CLR +0x24, STA +0x28 (stock spmi-mtk-pmif.ko table for
- *                mediatek,mt6855-spmi); ACC = opc << 30 | wr << 29 | sid << 24
+ *                mediatek,mt6855-spmi). The AP owns SWINF 2: the stock driver
+ *                uses regs[25 + 5 * soc_chan] with soc_chan = 2 for MT6855.
+ *                E27 used SWINF 0 (another master's channel) and the phone
+ *                then reset itself during boot; never touch SWINF 0/1/3.
+ *                ACC = opc << 30 | wr << 29 | sid << 24
  *                | (bytes - 1) << 16 | addr, opc 3 = extended long read;
  *                STA bits 3:1 = 0 idle, 6 wait-for-valid-clear.
  */
@@ -1402,13 +1406,8 @@ static void key_scan(void)
     for (u32 ch = 0; ch < 4; ch++)
         puts_(" ", WHITE), hex(r32(PMIF + 0x828 + 0x40 * ch), 4, WHITE);
     puts_("\n", WHITE);
-    u32 ch = 0, v = 0;
-    int rc = -9;
-    for (ch = 0; ch < 4; ch++) {
-        rc = spmi_rd(ch, 4, 0x1e, &v);
-        if (rc == 0)
-            break;
-    }
+    u32 ch = 2, v = 0;                      /* AP channel only (see above) */
+    int rc = spmi_rd(ch, 4, 0x1e, &v);
     puts_(" PMIC ", GREEN);
     kv("CH", ch, 1);
     kv("RC", (u32)rc & 0xff, 2);
@@ -1419,7 +1418,7 @@ static void key_scan(void)
     u32 last_t = 0xffffffffU, last_k = 0xffffffffU;
     while (ticks() < end) {
         u32 t = 0;
-        int r = (ch < 4) ? spmi_rd(ch, 4, 0x1e, &t) : -9;
+        int r = spmi_rd(ch, 4, 0x1e, &t);
         u32 k = r32(KPD + 0x04);
         if (t != last_t || k != last_k) {
             last_t = t;

@@ -75,7 +75,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | # | Issue | What is known / first idea |
 | --- | --- | --- |
 | 1 | ~~**No touch** in iOS~~ **fixed in E26** | Polled at 8 ms; no IRQ (EINT22), no firmware reload on chip watchdog (FD/FE reports are only counted), probe-side download only |
-| 2 | **No buttons** (power, volume) | Hardware read in [E27](experiments/2026-11-13-e27-keys.md): volume up = KPD `0x1c00e000` KP_MEM1 bit 0; power/volume down = MT6363 TOPSTATUS `0x1e` bits 1/3 over SPMI (PMIF `0x1c804000`, SWINF0 `+0x800`). Kernel patch 0203 (`g54keys=1`) next |
+| 2 | **No buttons** (power, volume) | Hardware read in [E27](experiments/2026-11-13-e27-keys.md): volume up = KPD `0x1c00e000` KP_MEM1 bit 0; power/volume down = MT6363 TOPSTATUS `0x1e` bits 1/3 over SPMI (PMIF `0x1c804000`, **AP channel SWINF 2 `+0x880`**; E27's use of SWINF 0 was followed by spontaneous full resets). Kernel patch 0203 (`g54keys=1`) next |
 | 3 | **Brief garbled framebuffer after the Apple logo** | The probe's own text in OVL1 layer 0 (`FE0D0000`, pitch 0x1100) is shown at the wrong pitch while iOS takes over (E20). Fix: the probe draws only into the visible OVL0 L1 buffer or clears/disables OVL1 L0 before the jump |
 | 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
 | 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |

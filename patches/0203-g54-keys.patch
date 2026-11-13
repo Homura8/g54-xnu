@@ -1,11 +1,12 @@
 G54: polled side keys (boot-arg g54keys=1).
 
 Volume up is MTK KPD 0x1c00e000 KP_MEM1 bit 0; power and volume down are
-MT6363 TOPSTATUS 0x1e bits 1 and 3, read over SPMI (PMIF 0x1c804000,
-software channel 0 at +0x800). Offsets from the stock mtk-pmic-keys.ko and
-spmi-mtk-pmif.ko, checked live by the g54-xnu probe (E27). A thread polls
-every 20 ms with a two-sample debounce and reports through sweet_hid_key().
-The PMIC is only read. Off by default.
+MT6363 TOPSTATUS 0x1e bits 1 and 3, read over SPMI through the AP's PMIF
+software channel (SWINF 2 at PMIF 0x1c804000 + 0x880, as the stock
+spmi-mtk-pmif.ko selects for MT6855). Offsets from the stock
+mtk-pmic-keys.ko and spmi-mtk-pmif.ko, checked live by the g54-xnu probe
+(E27). A thread polls every 20 ms with a two-sample debounce and reports
+through sweet_hid_key(). The PMIC is only read. Off by default.
 
 diff --git a/bsd/conf/files b/bsd/conf/files
 index f9509b8..825fa14 100644
@@ -21,10 +22,10 @@ index f9509b8..825fa14 100644
  bsd/dev/ruby_battery.c			standard
 diff --git a/bsd/dev/g54_keys.c b/bsd/dev/g54_keys.c
 new file mode 100644
-index 0000000..c081535
+index 0000000..db208ed
 --- /dev/null
 +++ b/bsd/dev/g54_keys.c
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,168 @@
 +/*
 + * G54 (Moto G54, MT6855): side keys, polled.
 + *
@@ -36,14 +37,16 @@ index 0000000..c081535
 + *
 + * Register offsets come from the stock mtk-pmic-keys.ko (mt6363_regs) and
 + * spmi-mtk-pmif.ko (mediatek,mt6855-spmi: SWINF n at PMIF+0x800+0x40n) and
-+ * were checked live by the g54-xnu probe (docs/experiments E27: channel 0
-+ * answers, TOPSTATUS idle 0x1e, all three keys seen). The PMIC is
++ * were checked live by the g54-xnu probe (docs/experiments E27: TOPSTATUS
++ * idle 0x1e, all three keys seen). The PMIC is
 + * only read (SPMI extended-long read commands); nothing is written to it.
 + *
 + * A kernel thread polls every 20 ms, needs two equal samples before a state
 + * change and reports through sweet_hid_key() (0 power, 1 volume up,
-+ * 2 volume down). Enabled by boot-arg g54keys=1; g54keysch=<0..3> picks the
-+ * PMIF software channel (default 0).
++ * 2 volume down). Enabled by boot-arg g54keys=1. Only the AP's PMIF software
++ * channel is used: SWINF 2, as the stock driver selects (regs[25 + 5 *
++ * soc_chan], soc_chan = 2 for MT6855). SWINF 0 belongs to another master;
++ * reading through it (probe E27) was followed by spontaneous full resets.
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +
@@ -166,7 +169,7 @@ index 0000000..c081535
 +void
 +g54_keys_init(void)
 +{
-+	int on = 0, ch = 0;
++	int on = 0;
 +	thread_t thread;
 +
 +	if (gk.started) {
@@ -176,10 +179,7 @@ index 0000000..c081535
 +	if (!PE_parse_boot_argn("g54keys", &on, sizeof(on)) || on != 1) {
 +		return;
 +	}
-+	if (PE_parse_boot_argn("g54keysch", &ch, sizeof(ch)) && (ch < 0 || ch > 3)) {
-+		ch = 0;
-+	}
-+	gk.ch = (uint32_t)ch;
++	gk.ch = 2;
 +	gk.kpd = (volatile uint32_t *)ml_io_map(GK_KPD_PA, 0x1000);
 +	gk.pmif = (volatile uint32_t *)ml_io_map(GK_PMIF_PA, 0x1000);
 +	if (!gk.kpd || !gk.pmif) {
