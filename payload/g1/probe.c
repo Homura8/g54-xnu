@@ -1403,6 +1403,26 @@ static int spmi_rd(u32 ch, u32 sid, u32 addr, u32 *out)
     return 0;
 }
 
+#ifdef PMIC_ACK
+/* One-byte SPMI extended-long write (WDATA +0x04, write bit 29), as the stock
+ * PMIF driver does; done when the channel returns to idle. */
+static int spmi_wr(u32 ch, u32 sid, u32 addr, u32 val)
+{
+    u64 b = PMIF + 0x800 + 0x40 * ch;
+    u64 end = ticks() + freq() / 1000;
+    while (((r32(b + 0x28) >> 1) & 7) != 0)
+        if (ticks() > end)
+            return -1;
+    w32(b + 0x04, val & 0xff);
+    w32(b, (3U << 30) | (1U << 29) | (sid << 24) | (0U << 16) | (addr & 0xffff));
+    end = ticks() + freq() / 1000;
+    while (((r32(b + 0x28) >> 1) & 7) != 0)
+        if (ticks() > end)
+            return -2;
+    return 0;
+}
+#endif
+
 #ifdef KEY_SCAN
 static void key_scan(void)
 {
@@ -1549,6 +1569,32 @@ static void pmic_diff_test(void)
     kv("\nN", n, 3);
     puts_("\n", WHITE);
 
+#ifdef PMIC_ACK
+    /*
+     * E31: acknowledge the way the stock mtk-spmi-pmic IRQ handler does after
+     * every PMIC interrupt: write the PSC status bits back (W1C, 0x91b and
+     * 0x91c, group "PSC", hwirq 0x30..) and then 0x41b = 1. E30 showed the
+     * press starts a ~79 s countdown in 0xa15..0xa17 ending in a cold reset.
+     */
+    {
+        u32 s1 = 0, s2 = 0;
+        spmi_rd(2, 4, 0x91b, &s1);
+        spmi_rd(2, 4, 0x91c, &s2);
+        int w1 = s1 ? spmi_wr(2, 4, 0x91b, s1) : 9;
+        int w2 = s2 ? spmi_wr(2, 4, 0x91c, s2) : 9;
+        int w3 = spmi_wr(2, 4, 0x41b, 1);
+        u32 a1 = 0, a2 = 0;
+        spmi_rd(2, 4, 0x91b, &a1);
+        spmi_rd(2, 4, 0x91d, &a2);
+        puts_("ACK (STOCK IRQ HANDLER): ", GREEN);
+        kv("91B", s1, 2);
+        kv("91C", s2, 2);
+        kv("WR", ((u32)(w1 & 0xf) << 8) | ((u32)(w2 & 0xf) << 4) | (u32)(w3 & 0xf), 3);
+        kv("91B NOW", a1, 2);
+        kv("91D NOW", a2, 2);
+        puts_("\n", WHITE);
+    }
+#endif
     puts_("DON'T TOUCH. WAITING; DOES IT POWER OFF WITHOUT IOS?\n", 0xffffff00U);
     u32 ly = cy;
     for (u32 t = 0; t < PMIC_WAIT_S; t += 30) {
@@ -1558,7 +1604,8 @@ static void pmic_diff_test(void)
         cx = 0;
         cy = ly;
         kv("T", t + 30, 3);
-        puts_("S, CHANGED SINCE PRESS: ", GREEN);
+        kv("CNT A17-15", ((u32)pm_a[0xa17] << 16) | ((u32)pm_a[0xa16] << 8) | pm_a[0xa15], 6);
+        puts_("CHANGED SINCE PRESS: ", GREEN);
         u32 m = pmic_diff(pm_b, pm_a, 24);
         kv("N", m, 3);
         puts_("                    \n", WHITE);
