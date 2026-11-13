@@ -49,7 +49,46 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 usable by touch on the G54
+## ▶ Resume here (handoff, 13 November 2026 04:35 UTC)
+
+**State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~3 min with **real
+touch and all three side keys** (E26, E28). Phone has **E29** on `boot_a`
+(flashed 04:32:25 UTC): kernel **K4** (CI 43363468664, `6b7ddff8…`, patches
+0200–0203), cmdline E28's (`… sweetfb_noconsole=1 g54nvt=1 g54keys=1`),
+probe `out/g1-lastlog` (touch firmware download + dot test, VRAM clear
+before the jump, **LASTLOG page**). The gated CI run 43364654526 (`00ace74`,
+same code as K4, 0203 hooks moved) passed. PR #7 is open, not merged.
+
+**Running experiment (E29):** each boot first shows "LAST BOOT LOG" for 25 s:
+the tail of the *previous* boot's kernel console, read from RAM
+(`sweet_log_ring` PA `0x141c765f8`, `sweet_log_total` PA `0x141c765f0`, valid
+for K4 only; recompute with `llvm-nm` + `PA = VA - 0xfffffe0006000000 +
+0x140000000` for any other kernel). Ask the owner to press the keys in iOS,
+wait for the spontaneous reset (issue #7), and photograph the LAST BOOT LOG
+page of the following boot. "NO VALID RING"/garbage means a cold reset
+(RAM lost). Write the E29 run card from that.
+
+**Rebuild E29:** probe `python3 scripts/g54_payload.py build --out
+out/g1-lastlog -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW -D NO_RESV -D
+LOADER_S=5 -D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0`; image
+`scripts/g54_xnu_image.py --topaz out/topaz --kernel out/k4/kernel.development.sweet
+--stock out/fw/boot.img --probe out/g1-lastlog --ufs --d22ap out/ipsw/d22ap.adt
+--touch-fw out/touch/novatek_ts_fw.bin --cmdline "<E28 cmdline>" --out …`
+(`novatek_ts_fw.bin` is extracted locally from vendor_dlkm firmware, never
+committed). Local kernel tree with the full patch stack: `out/kxnu` (Apple
+xnu-8796.141.3 + `out/kbase/xnu/patches`), used to write and regenerate
+patches; each G54 patch must also reverse-apply on its own (CI gate).
+
+**Lessons this session:** never use PMIF SWINF 0 (E27: touch lost); the AP's
+channel is SWINF 2 (`regs[25 + 5*soc_chan]`, soc_chan 2). The Novatek report
+is big-endian 16-bit x/y in 4320×9600 units with a checksum (stock
+`nvt_ts_work_func`). Stock module disassembly (`out/vb/rd/lib/modules`,
+`out/dlkm`) answered every register question faster than guessing.
+
+**Next, in order:** (1) E29 result → cause of the press-linked reset;
+(2) composition/fps issues (#6, #8, #10); (3) RTC, battery, backlight.
+
+## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 usable by touch and keys on the G54
 
 [E26](experiments/2026-11-13-e26-ios-touch.md): kernel K3 (patch 0202,
 `g54nvt=1`) plus the probe's firmware download gives **real touch in iOS**:
