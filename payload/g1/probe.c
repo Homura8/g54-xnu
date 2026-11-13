@@ -1328,9 +1328,14 @@ static void touch_fw(void)
      * y = b3 << 8 | b4 (big-endian, 4x panel units, max from INFO). Raw bytes
      * are shown when they change.
      */
-    puts_(" TOUCH THE SCREEN (20 S)\n", GREEN);
+#ifndef TOUCH_TEST_S
+#define TOUCH_TEST_S 20     /* 0 skips the on-screen test (download only) */
+#endif
+    if (TOUCH_TEST_S == 0)
+        return;
+    puts_(" TOUCH THE SCREEN\n", GREEN);
     u32 lx = cx, ly = cy;
-    u64 end = ticks() + 20 * freq();
+    u64 end = ticks() + TOUCH_TEST_S * freq();
     u8 last[14] = {0};
     u32 n = 0;
     while (ticks() < end) {
