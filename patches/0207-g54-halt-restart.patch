@@ -1,0 +1,104 @@
+G54: real shutdown and restart (PSCI CPU_OFF, SYSTEM_OFF, SYSTEM_RESET).
+
+SweetCPU::quiesceCPU() panicked and PE_halt_restart was NULL, so iOS's
+"slide to power off" panicked the G54 (owner, E35). quiesceCPU now powers
+the CPU down with PSCI CPU_OFF (it returns through CPU_ON), haltCPU waits in
+WFI, and PE_halt_restart maps halt to PSCI SYSTEM_OFF and restart to PSCI
+SYSTEM_RESET after clearing the MT6855 watchdog reboot-mode nibble
+(TOPRGU 0x1c007000 + 0x24) that the g54-xnu loader sets to Fastboot, so a
+user restart boots normally. Panic paths are unchanged.
+
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 2545cf9..33ada71 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -251,16 +251,29 @@ SweetCPU::startCPU(vm_offset_t start_paddr, vm_offset_t arg_paddr)
+ 	return KERN_SUCCESS;
+ }
+ 
++/*
++ * G54: power the calling CPU down with PSCI CPU_OFF (it comes back through
++ * startCPU's CPU_ON). XNU quiesces every secondary CPU on shutdown and
++ * restart; the old panic here made "slide to power off" panic the phone.
++ */
+ void
+ SweetCPU::quiesceCPU(void)
+ {
+-	panic("SWEET CPU: CPU quiesce is not implemented");
++	register uint64_t x0 __asm__("x0") = 0x84000002ULL;     /* PSCI CPU_OFF */
++	__asm__ volatile("dsb sy; smc #0" : "+r"(x0) : :
++	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++	for (;;) {
++		__asm__ volatile("wfi");
++	}
+ }
+ 
+ void
+ SweetCPU::haltCPU(void)
+ {
+-	panic("SWEET CPU: CPU halt/suspend is not implemented");
++	for (;;) {
++		__asm__ volatile("dsb sy; wfi");
++	}
+ }
+ 
+ const OSSymbol *
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 6abab56..409e007 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -32,11 +32,53 @@ public:
+ 
+ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+ 
++/*
++ * G54 halt/restart (PE_halt_restart was NULL: shutdown spun forever after the
++ * CPU quiesce). Halt = PSCI SYSTEM_OFF. Restart = PSCI SYSTEM_RESET after
++ * clearing the MT6855 watchdog reboot-mode bits (TOPRGU 0x1c007000 + 0x24,
++ * low nibble) that the g54-xnu loader set to "bootloader", so a user restart
++ * boots normally instead of entering Fastboot. Panic paths are untouched
++ * (g54panicreset still lands in Fastboot).
++ */
++extern int (*PE_halt_restart)(unsigned int type);
++extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++static volatile uint32_t *sweet_toprgu;
++
++static void
++sweet_psci_system(uint64_t fn)
++{
++	register uint64_t x0 __asm__("x0") = fn;
++	__asm__ volatile("dsb sy; smc #0" : "+r"(x0) : :
++	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
++	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++}
++
++static int
++sweet_halt_restart(unsigned int type)
++{
++	if (type == kPEHaltCPU) {
++		IOLog("SWEET: power off (PSCI SYSTEM_OFF)\n");
++		sweet_psci_system(0x84000008ULL);
++	} else if (type == kPERestartCPU) {
++		if (sweet_toprgu != NULL) {
++			sweet_toprgu[0x24 / 4] = sweet_toprgu[0x24 / 4] & ~0xfu;   /* as the loader writes it, no key */
++		}
++		IOLog("SWEET: restart (PSCI SYSTEM_RESET)\n");
++		sweet_psci_system(0x84000009ULL);
++	} else {
++		return -1;
++	}
++	return -1;      /* PSCI returned: report failure */
++}
++
+ bool
+ SweetPlatformExpert::start(IOService *provider)
+ {
+ 	int gate = 1;
+ 
++	sweet_toprgu = (volatile uint32_t *)ml_io_map(0x1c007000, 0x1000);
++	PE_halt_restart = &sweet_halt_restart;
++
+ 	IOLog("SWEET: starting device-tree platform expert\n");
+ 	if (!IODTPlatformExpert::start(provider)) {
+ 		return false;
