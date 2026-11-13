@@ -539,9 +539,11 @@ static void info_screen(const struct handoff *h, u64 pc, int which)
         hex(fr[i].size, 9, WHITE);
         puts_(i & 1 ? "\n" : "  ", WHITE);
     }
-#ifdef TOUCH_SCAN
+#if defined(TOUCH_SCAN)
     puts_("\n", WHITE);
     touch_scan(h->dtb);
+#elif defined(NO_RESV)
+    /* reserved list omitted for space (recorded in E4) */
 #else
     puts_("\nRESERVED ", GREEN);
     hex(h->nres, 2, WHITE);
@@ -995,6 +997,159 @@ static void ufs_hs(void)
 }
 #endif /* UFS_HS */
 
+
+#ifdef TOUCH_SPI
+/*
+ * E23: SPI3 bring-up and Novatek NT36672C chip-ID read (touch stage 1).
+ * G54 values (docs/experiments/2026-11-13-e22-touch-scan.md):
+ *   SPI3 0x11013000 ("mediatek,mt6983-spi"), pad-select 0 for CS0;
+ *   clock peraop_spi3_bclk = pericfg_ao 0x11036000 bit 14 (sta 0x10,
+ *   clr/ungate 0x2c, set/gate 0x28; decoded from stock clk-mt6855-peri.ko);
+ *   pins GPIO73-76 function 2 (GPIO_MODE9 nibbles 1-4); TP reset GPIO3.
+ * Controller sequence: ruby-ios-bringup bsd/dev/ruby_spi3.c (FIFO mode,
+ * <= 32-byte packets). Novatek SPI framing (public nt36xxx driver behaviour):
+ * page = {0xff, a>>15, a>>7}; write = {(a&0x7f)|0x80, data...};
+ * read = {a&0x7f, dummy, ...} with data from the third byte.
+ */
+#define SPI3        0x11013000UL
+#define S_CFG0      0x00
+#define S_CFG1      0x04
+#define S_TX        0x10
+#define S_RX        0x14
+#define S_CMD       0x18
+#define S_ST0       0x1c
+#define S_PAD       0x24
+#define S_CFG2      0x28
+#define S_CFG3      0x2c
+#define C_ACT       (1U << 0)
+#define C_RST       (1U << 2)
+#define C_PAUSE     (1U << 4)
+#define C_MSB       ((1U << 12) | (1U << 13))
+#define PERAO       0x11036000UL
+#define GPIOB       0x10005000UL
+#define NVT_SWRST   0x3f0feU
+#define NVT_TRIM    0x3f004U
+
+static int spi_xfer(const u8 *tx, u8 *rx, u32 len)
+{
+    w32(SPI3 + S_CMD, C_RST);
+    w32(SPI3 + S_CMD, 0);
+    w32(SPI3 + S_CMD, C_MSB);
+    w32(SPI3 + S_PAD, 0);
+    u32 c1 = r32(SPI3 + S_CFG1) & ~(0xff00U | 0x3ff0000U);
+    w32(SPI3 + S_CFG1, c1 | ((len - 1) & 0x3ff) << 16);
+    for (u32 i = 0; i < len; i += 4) {
+        u32 w = 0;
+        for (u32 j = 0; j < 4 && i + j < len; j++)
+            w |= (u32)tx[i + j] << (8 * j);
+        w32(SPI3 + S_TX, w);
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    w32(SPI3 + S_CMD, C_MSB | C_ACT);
+    u64 end = ticks() + freq() / 100;
+    while (!(r32(SPI3 + S_ST0) & 1))
+        if (ticks() > end) {
+            w32(SPI3 + S_CMD, C_MSB | C_PAUSE);
+            return 0;
+        }
+    if (rx)
+        for (u32 i = 0; i < len; i += 4) {
+            u32 w = r32(SPI3 + S_RX);
+            for (u32 j = 0; j < 4 && i + j < len; j++)
+                rx[i + j] = (u8)(w >> (8 * j));
+        }
+    w32(SPI3 + S_CMD, C_MSB | C_PAUSE);
+    return 1;
+}
+
+static int nvt_page(u32 a)
+{
+    u8 tx[3] = {0xff, (u8)(a >> 15), (u8)(a >> 7)};
+    return spi_xfer(tx, 0, 3);
+}
+
+static int nvt_write1(u32 a, u8 v)
+{
+    if (!nvt_page(a))
+        return 0;
+    u8 tx[2] = {(u8)((a & 0x7f) | 0x80), v};
+    return spi_xfer(tx, 0, 2);
+}
+
+static int nvt_read(u32 a, u8 *out, u32 n)   /* n <= 28 */
+{
+    u8 tx[32], rx[32];
+    for (u32 i = 0; i < 32; i++)
+        tx[i] = rx[i] = 0;
+    if (!nvt_page(a))
+        return 0;
+    tx[0] = (u8)(a & 0x7f);
+    if (!spi_xfer(tx, rx, n + 2))
+        return 0;
+    for (u32 i = 0; i < n; i++)
+        out[i] = rx[2 + i];
+    return 1;
+}
+
+static void touch_spi(void)
+{
+    puts_("TOUCH SPI3\n", GREEN);
+    u32 cg0 = r32(PERAO + 0x10);
+    w32(PERAO + 0x2c, 1U << 14);                   /* ungate peraop_spi3_bclk */
+    u32 cg1 = r32(PERAO + 0x10);
+    u32 m9 = r32(GPIOB + 0x390), m0 = r32(GPIOB + 0x300);
+    kv(" CG", cg0, 8);
+    kv("->", cg1, 8);
+    kv("M9", m9, 8);
+    puts_("\n", WHITE);
+    kv(" CFG0", r32(SPI3 + S_CFG0), 8);
+    kv("1", r32(SPI3 + S_CFG1), 8);
+    kv("2", r32(SPI3 + S_CFG2), 8);
+    puts_("\n", WHITE);
+    kv(" CFG3", r32(SPI3 + S_CFG3), 8);
+    kv("CMD", r32(SPI3 + S_CMD), 8);
+    kv("M0", m0, 8);
+    puts_("\n", WHITE);
+
+    /* Controller first (ruby order), slow clock: sck/cs counts 32 (~0.4-1 MHz). */
+    w32(SPI3 + S_CMD, C_RST);
+    w32(SPI3 + S_CMD, 0);
+    w32(SPI3 + S_PAD, 0);
+    w32(SPI3 + S_CMD, C_MSB);
+    w32(SPI3 + S_CFG2, (31U << 16) | 31U);         /* sck low/high */
+    w32(SPI3 + S_CFG0, (63U << 16) | 63U);         /* cs hold/setup */
+    w32(SPI3 + S_CFG1, (r32(SPI3 + S_CFG1) & ~0xffU) | 63U);
+    w32(SPI3 + S_CMD, C_MSB | C_PAUSE);
+    /* Pins 73-76 -> function 2; TP reset GPIO3 -> GPIO, output, high. */
+    w32(GPIOB + 0x390, (m9 & ~0x000ffff0U) | 0x00022220U);
+    w32(GPIOB + 0x300, m0 & ~0x0000f000U);
+    w32(GPIOB + 0x004, 1U << 3);                   /* DIR set */
+    w32(GPIOB + 0x104, 1U << 3);                   /* DOUT set */
+    delay_us(20000);
+    kv(" M9 NOW", r32(GPIOB + 0x390), 8);
+    puts_("\n", WHITE);
+
+    u8 id[8] = {0};
+    int r0 = nvt_read(NVT_TRIM, id, 6);
+    puts_(" ID0 ", GREEN);
+    kv("OK", r0, 1);
+    for (int i = 0; i < 6; i++)
+        hex(id[i], 2, WHITE), puts_(" ", WHITE);
+    puts_("\n", WHITE);
+    int w = nvt_write1(NVT_SWRST, 0x69);           /* bootloader reset */
+    delay_us(40000);
+    for (int i = 0; i < 8; i++)
+        id[i] = 0;
+    int r1 = nvt_read(NVT_TRIM, id, 6);
+    puts_(" ID1 ", GREEN);
+    kv("W", w, 1);
+    kv("OK", r1, 1);
+    for (int i = 0; i < 6; i++)
+        hex(id[i], 2, WHITE), puts_(" ", WHITE);
+    puts_("\n", WHITE);
+}
+#endif /* TOUCH_SPI */
+
 static void ufs_diag_fix(void)
 {
     puts_("UFS ", GREEN);
@@ -1232,6 +1387,9 @@ void probe_main(u64 dtb, u64 pc)
     u64 pl = find_payload((u64)_end);
 #ifdef UFS_FIX
     ufs_diag_fix();
+#endif
+#ifdef TOUCH_SPI
+    touch_spi();
 #endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);
