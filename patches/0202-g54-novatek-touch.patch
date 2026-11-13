@@ -22,10 +22,10 @@ index c604511..f9509b8 100644
  bsd/dev/ruby_battery.c			standard
 diff --git a/bsd/dev/g54_nvt_touch.c b/bsd/dev/g54_nvt_touch.c
 new file mode 100644
-index 0000000..8fb743e
+index 0000000..9175435
 --- /dev/null
 +++ b/bsd/dev/g54_nvt_touch.c
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,345 @@
 +/*
 + * G54 (Moto G54, MT6855): Novatek NT36672C touch over SPI3, polled.
 + *
@@ -65,6 +65,7 @@ index 0000000..8fb743e
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern kern_return_t thread_terminate(thread_t);
 +extern void sweet_hid_touch(int finger, int down, int x, int y);
 +
 +#define NVT_SPI3_PA     0x11013000u
