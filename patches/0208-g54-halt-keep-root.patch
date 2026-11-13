@@ -1,0 +1,49 @@
+G54: do not unmount the HFS+ root at halt (boot-arg g54halt_unmountroot=1 restores it).
+
+"Slide to power off" stopped at "unmount(0) /" and IOKit's 30 s timer then
+panicked with "Halt/Restart Timed Out" (g54-xnu E36b, previous-boot log),
+so 0207's PSCI SYSTEM_OFF was never reached. The disks are synced earlier in
+reboot_kernel and HFS+ replays its journal at the next mount. The underlying
+UFS/HFS unmount stall remains to be found.
+
+diff --git a/bsd/kern/kern_shutdown.c b/bsd/kern/kern_shutdown.c
+index 20d9d47..2b48807 100644
+--- a/bsd/kern/kern_shutdown.c
++++ b/bsd/kern/kern_shutdown.c
+@@ -70,6 +70,7 @@
+ #include <IOKit/IOMessage.h>
+ 
+ #include <sys/kdebug.h>
++#include <pexpert/pexpert.h>
+ 
+ uint32_t system_inshutdown = 0;
+ uint32_t final_shutdown_stage = 0;
+@@ -283,9 +284,25 @@ reboot_kernel(int howto, char *message)
+ 		if (!(howto & RB_PANIC) || !kdp_has_polled_corefile())
+ #endif /* DEVELOPMENT || DEBUG */
+ 		{
+-			startTime = mach_absolute_time();
+-			vfs_unmountall(FALSE);
+-			halt_log_enter("vfs_unmountall", 0, mach_absolute_time() - startTime);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			/*
++			 * G54: unmounting the HFS+ root on the SWEET UFS disk never
++			 * completes ("unmount(0) /" was the last line before the 30 s
++			 * "Halt/Restart Timed Out" panic, g54-xnu E36b). Disks were
++			 * synced above and HFS+ replays its journal at the next mount,
++			 * so skip it unless g54halt_unmountroot=1.
++			 */
++			int g54_unmountroot = 0;
++			PE_parse_boot_argn("g54halt_unmountroot", &g54_unmountroot, sizeof(g54_unmountroot));
++			if (!g54_unmountroot) {
++				printf("G54: skipping the root unmount at halt (synced, journaled)\n");
++			} else
++#endif
++			{
++				startTime = mach_absolute_time();
++				vfs_unmountall(FALSE);
++				halt_log_enter("vfs_unmountall", 0, mach_absolute_time() - startTime);
++			}
+ 		}
+ 
+ 
