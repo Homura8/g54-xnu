@@ -1328,9 +1328,14 @@ static void touch_fw(void)
      * y = b3 << 8 | b4 (big-endian, 4x panel units, max from INFO). Raw bytes
      * are shown when they change.
      */
-    puts_(" TOUCH THE SCREEN (20 S)\n", GREEN);
+#ifndef TOUCH_TEST_S
+#define TOUCH_TEST_S 20     /* 0 skips the on-screen test (download only) */
+#endif
+    if (TOUCH_TEST_S == 0)
+        return;
+    puts_(" TOUCH THE SCREEN\n", GREEN);
     u32 lx = cx, ly = cy;
-    u64 end = ticks() + 20 * freq();
+    u64 end = ticks() + TOUCH_TEST_S * freq();
     u8 last[14] = {0};
     u32 n = 0;
     while (ticks() < end) {
@@ -1363,7 +1368,7 @@ static void touch_fw(void)
 #endif /* TOUCH_FW */
 
 
-#ifdef KEY_SCAN
+#if defined(KEY_SCAN) || defined(PMIC_DIFF)
 /*
  * E27: G54 key hardware, read live (no writes except SPMI read commands).
  *   Volume up:   MTK KPD 0x1c00e000 (DTBO hw-init-map key 0 = 0x73),
@@ -1387,20 +1392,43 @@ static void touch_fw(void)
 static int spmi_rd(u32 ch, u32 sid, u32 addr, u32 *out)
 {
     u64 b = PMIF + 0x800 + 0x40 * ch;
-    u64 end = ticks() + freq() / 100;
+    u64 end = ticks() + freq() / 1000;      /* transactions take microseconds */
     while (((r32(b + 0x28) >> 1) & 7) != 0)
         if (ticks() > end)
             return -1;
     w32(b, (3U << 30) | (sid << 24) | (0U << 16) | (addr & 0xffff));
-    end = ticks() + freq() / 100;
+    end = ticks() + freq() / 1000;
     while (((r32(b + 0x28) >> 1) & 7) != 6)
-        if (ticks() > end)
+        if (ticks() > end) {
+            w32(b + 0x24, 1);               /* release the channel anyway */
             return -2;
+        }
     *out = r32(b + 0x14);
     w32(b + 0x24, 1);
     return 0;
 }
 
+#ifdef PMIC_ACK
+/* One-byte SPMI extended-long write (WDATA +0x04, write bit 29), as the stock
+ * PMIF driver does; done when the channel returns to idle. */
+static int spmi_wr(u32 ch, u32 sid, u32 addr, u32 val)
+{
+    u64 b = PMIF + 0x800 + 0x40 * ch;
+    u64 end = ticks() + freq() / 1000;
+    while (((r32(b + 0x28) >> 1) & 7) != 0)
+        if (ticks() > end)
+            return -1;
+    w32(b + 0x04, val & 0xff);
+    w32(b, (3U << 30) | (1U << 29) | (sid << 24) | (0U << 16) | (addr & 0xffff));
+    end = ticks() + freq() / 1000;
+    while (((r32(b + 0x28) >> 1) & 7) != 0)
+        if (ticks() > end)
+            return -2;
+    return 0;
+}
+#endif
+
+#ifdef KEY_SCAN
 static void key_scan(void)
 {
     puts_("KEYS\n", GREEN);
@@ -1441,6 +1469,160 @@ static void key_scan(void)
     cy = ly + 36;
 }
 #endif /* KEY_SCAN */
+
+#ifdef PMIC_DIFF
+/*
+ * E30: what does a power-key press change in the MT6363, and does the phone
+ * power itself off afterwards with no XNU running? Read-only: snapshot PMIC
+ * registers 0x000..PMIC_DIFF_END through the AP's SWINF 2, wait for one
+ * power-key press and release, snapshot again and list the changes, then
+ * stay here PMIC_WAIT_S seconds re-diffing every 30 s (counters ticking
+ * toward a shutdown would show up). E28/E29: after key presses the phone
+ * cold-resets (on USB) or powers off (on battery) some minutes later.
+ */
+#ifndef PMIC_DIFF_END
+#define PMIC_DIFF_END 0x1000
+#endif
+#ifndef PMIC_WAIT_S
+#define PMIC_WAIT_S 360
+#endif
+static u8 pm_a[PMIC_DIFF_END], pm_b[PMIC_DIFF_END], pm_ok[PMIC_DIFF_END];
+
+static u32 pmic_snap(u8 *dst, int first)
+{
+    u32 bad = 0;
+    for (u32 a = 0; a < PMIC_DIFF_END; a++) {
+        u32 v = 0;
+        int ok = spmi_rd(2, 4, a, &v) == 0;
+        if (first)
+            pm_ok[a] = (u8)ok;
+        if (!ok)
+            bad++;
+        dst[a] = (u8)v;
+        if ((a & 0xff) == 0)
+            kick();
+    }
+    return bad;
+}
+
+/* Print changed registers a -> b (skipping unreadable ones), at most max. */
+static u32 pmic_diff(const u8 *a, const u8 *b, u32 max)
+{
+    u32 n = 0;
+    for (u32 r = 0; r < PMIC_DIFF_END; r++) {
+        if (!pm_ok[r] || a[r] == b[r])
+            continue;
+        if (n < max) {
+            hex(r, 3, GREY);
+            puts_(":", GREY);
+            hex(a[r], 2, WHITE);
+            puts_(">", GREY);
+            hex(b[r], 2, 0xffffff00U);
+            puts_("  ", WHITE);
+        }
+        n++;
+    }
+    return n;
+}
+
+static void pmic_diff_test(void)
+{
+    sc = 2;
+    fill(&h.fb, BLACK);
+    cx = cy = 0;
+    puts_("E30 PMIC DIFF (MT6363 SID 4 VIA SWINF 2, READ ONLY)\n", GREEN);
+    u32 bad = pmic_snap(pm_a, 1);
+    kv("REGS", PMIC_DIFF_END, 4);
+    kv("UNREADABLE", bad, 4);
+    kv("TOP", pm_a[0x1e], 2);
+    kv("A0E", pm_a[0xa0e], 2);
+    kv("A0F", pm_a[0xa0f], 2);
+    kv("90F", pm_a[0x90f], 2);
+    puts_("\n", WHITE);
+    /* Baseline noise: registers that change with no key press. */
+    wait_s(2);
+    pmic_snap(pm_b, 0);
+    puts_("NOISE (NO PRESS, 2 S): ", GREEN);
+    u32 noise = pmic_diff(pm_a, pm_b, 40);
+    kv("\nN", noise, 3);
+    puts_("\n", WHITE);
+    for (u32 r = 0; r < PMIC_DIFF_END; r++)
+        if (pm_a[r] != pm_b[r])
+            pm_ok[r] = 0;            /* ignore free-running registers */
+    pmic_snap(pm_a, 0);
+
+    puts_("PRESS POWER ONCE, BRIEFLY (30 S)\n", 0xffffff00U);
+    u64 end = ticks() + 30 * freq();
+    int pressed = 0, released = 0;
+    while (ticks() < end && !released) {
+        u32 t = 0xff;
+        spmi_rd(2, 4, 0x1e, &t);
+        if (!(t & 2))
+            pressed = 1;
+        else if (pressed)
+            released = 1;
+        kick();
+        delay_us(10000);
+    }
+    kv("PRESSED", pressed, 1);
+    kv("RELEASED", released, 1);
+    puts_("\n", WHITE);
+    wait_s(1);
+    pmic_snap(pm_b, 0);
+    puts_("CHANGED BY THE PRESS: ", GREEN);
+    u32 n = pmic_diff(pm_a, pm_b, 60);
+    kv("\nN", n, 3);
+    puts_("\n", WHITE);
+
+#ifdef PMIC_ACK
+    /*
+     * E31: acknowledge the way the stock mtk-spmi-pmic IRQ handler does after
+     * every PMIC interrupt: write the PSC status bits back (W1C, 0x91b and
+     * 0x91c, group "PSC", hwirq 0x30..) and then 0x41b = 1. E30 showed the
+     * press starts a ~79 s countdown in 0xa15..0xa17 ending in a cold reset.
+     */
+    {
+        u32 s1 = 0, s2 = 0;
+        spmi_rd(2, 4, 0x91b, &s1);
+        spmi_rd(2, 4, 0x91c, &s2);
+        int w1 = s1 ? spmi_wr(2, 4, 0x91b, s1) : 9;
+        int w2 = s2 ? spmi_wr(2, 4, 0x91c, s2) : 9;
+        int w3 = spmi_wr(2, 4, 0x41b, 1);
+        u32 a1 = 0, a2 = 0;
+        spmi_rd(2, 4, 0x91b, &a1);
+        spmi_rd(2, 4, 0x91d, &a2);
+        puts_("ACK (STOCK IRQ HANDLER): ", GREEN);
+        kv("91B", s1, 2);
+        kv("91C", s2, 2);
+        kv("WR", ((u32)(w1 & 0xf) << 8) | ((u32)(w2 & 0xf) << 4) | (u32)(w3 & 0xf), 3);
+        kv("91B NOW", a1, 2);
+        kv("91D NOW", a2, 2);
+        puts_("\n", WHITE);
+    }
+#endif
+    puts_("DON'T TOUCH. WAITING; DOES IT POWER OFF WITHOUT IOS?\n", 0xffffff00U);
+    u32 ly = cy;
+    for (u32 t = 0; t < PMIC_WAIT_S; t += 30) {
+        for (int i = 0; i < 30; i++)
+            wait_s(1);
+        pmic_snap(pm_a, 0);
+        cx = 0;
+        cy = ly;
+        kv("T", t + 30, 3);
+        kv("CNT A17-15", ((u32)pm_a[0xa17] << 16) | ((u32)pm_a[0xa16] << 8) | pm_a[0xa15], 6);
+        puts_("CHANGED SINCE PRESS: ", GREEN);
+        u32 m = pmic_diff(pm_b, pm_a, 24);
+        kv("N", m, 3);
+        puts_("                    \n", WHITE);
+    }
+    puts_("NO POWER-OFF IN THE PROBE. CONTINUING TO IOS\n", GREEN);
+    wait_s(3);
+    sc = SCALE;
+    fill(&h.fb, BLACK);
+    cx = cy = 0;
+}
+#endif /* PMIC_DIFF */
+#endif /* KEY_SCAN || PMIC_DIFF */
 
 static void ufs_diag_fix(void)
 {
@@ -1655,6 +1837,71 @@ static void reboot_bootloader(void)
 }
 
 
+
+#ifdef CPU_FREQ
+/*
+ * E34: CPU DVFS through MediaTek cpufreq-hw (stock DTB performance-controller,
+ * "mediatek,cpufreq-hw": domain 0 = A55 x6 at 0x0011bc10, domain 1 = A78 x2 at
+ * 0x0011bd30). Mainline mediatek-cpufreq-hw layout: LUT at +0 (u32 per level,
+ * bits 11:0 = MHz), ENABLE +0x84, PERF_STATE +0x88 (requested level index),
+ * HW_STATE +0x8c. Nothing on our side sets a level, so iOS ran at whatever
+ * LK left (E33: ~5 fps animations). Measures CPU0's real clock with the PMU
+ * cycle counter before and after requesting the fastest level, which then
+ * persists into XNU. Runtime DVFS state only (MCUPM sets the voltage).
+ */
+static const u64 cf_dom[2] = {0x0011bc10UL, 0x0011bd30UL};
+
+static u32 cpu0_mhz(void)
+{
+    u64 c0, c1;
+    __asm__ volatile("msr pmcr_el0, %0" ::"r"((u64)((1U << 6) | 1U)));  /* LC | E */
+    __asm__ volatile("msr pmcntenset_el0, %0" ::"r"((u64)1U << 31));
+    __asm__ volatile("isb; mrs %0, pmccntr_el0" : "=r"(c0));
+    u64 t0 = ticks(), t1 = t0 + freq() / 20;          /* 50 ms */
+    while (ticks() < t1)
+        ;
+    __asm__ volatile("isb; mrs %0, pmccntr_el0" : "=r"(c1));
+    return (u32)((c1 - c0) * 20 / 1000000);
+}
+
+static void cpu_freq(void)
+{
+    puts_("CPU FREQ (CPUFREQ-HW)\n", GREEN);
+    kv(" CPU0 MHZ", cpu0_mhz(), 4);
+    puts_("\n", WHITE);
+    u32 best[2] = {0, 0}, bestmhz[2] = {0, 0};
+    for (int d = 0; d < 2; d++) {
+        u64 b = cf_dom[d];
+        puts_(d ? " BIG " : " LITTLE ", GREEN);
+        kv("EN", r32(b + 0x84), 2);
+        kv("PERF", r32(b + 0x88), 2);
+        kv("HW", r32(b + 0x8c), 2);
+        puts_("LUT", GREY);
+        for (u32 i = 0; i < 32; i++) {
+            u32 mhz = r32(b + 4 * i) & 0xfff;
+            if (!mhz)
+                break;
+            if (mhz > bestmhz[d])
+                bestmhz[d] = mhz, best[d] = i;
+            if (i < 4 || (i & 3) == 0)
+                puts_(" ", WHITE), hex(mhz, 3, WHITE);
+        }
+        puts_("\n", WHITE);
+    }
+    for (int d = 0; d < 2; d++)
+        if (r32(cf_dom[d] + 0x84) == 1 && bestmhz[d])
+            w32(cf_dom[d] + 0x88, best[d]);
+    delay_us(20000);
+    puts_(" SET MAX: ", GREEN);
+    kv("L", best[0], 2);
+    kv("HW", r32(cf_dom[0] + 0x8c), 2);
+    kv("B", best[1], 2);
+    kv("HW", r32(cf_dom[1] + 0x8c), 2);
+    kv("CPU0 MHZ NOW", cpu0_mhz(), 4);
+    puts_("\n", WHITE);
+}
+#endif /* CPU_FREQ */
+
 #ifdef LASTLOG_RING
 /*
  * Previous boot's kernel console, read from RAM before the loader overwrites
@@ -1759,6 +2006,12 @@ void probe_main(u64 dtb, u64 pc)
 #endif
 #ifdef KEY_SCAN
     key_scan();
+#endif
+#ifdef PMIC_DIFF
+    pmic_diff_test();
+#endif
+#ifdef CPU_FREQ
+    cpu_freq();
 #endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);

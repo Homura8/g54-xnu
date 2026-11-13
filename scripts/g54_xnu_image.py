@@ -12,7 +12,8 @@ overridden here with G54 (MT6855) values observed on the phone (see
 docs/device-facts.md and docs/experiments/), then the tree is adjusted:
 
   * six Cortex-A55 CPUs, MPIDR Aff1 = 0..5 (live DTB cpu@000..005 reg
-    0x000..0x500; boot CPU reads MPIDR 0x81000000, E4),
+    0x000..0x500; boot CPU reads MPIDR 0x81000000, E4); --ncpu 8 adds the
+    two Cortex-A78s (DTB cpu@100/101, reg 0x600/0x700),
   * /sweet-ufs only with --ufs (MT6855 ufshci@112b0000; read-only unless
     the cmdline has ufsrw=1).
 
@@ -110,7 +111,7 @@ def build_adt(adt, mkadt, ncpu, ufs=False, d22ap=None):
             elif k == "state":
                 v = mkadt.cstr("running" if core == 0 else "stopped")
             elif k == "clock-frequency":
-                v = mkadt.u32(2000000000)
+                v = mkadt.u32(2200000000 if core >= 6 else 2000000000)   # A78 / A55 (DTB)
             props.append((k, f, v))
         n.props = props
         n.children = []
@@ -129,6 +130,8 @@ def main(argv=None):
     ap.add_argument("--probe", default=os.path.join(ROOT, "out", "g1"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--cpus", type=int, default=1)
+    ap.add_argument("--ncpu", type=int, default=6, choices=(6, 8),
+                    help="CPU nodes in the ADT: 6 = the A55s, 8 = plus the two A78s (MPIDR 0x600/0x700)")
     ap.add_argument("--cmdline")
     ap.add_argument("--touch-fw", help="local Novatek firmware blob (never committed) for probe -D TOUCH_FW")
     ap.add_argument("--d22ap", help="decoded DeviceTree.d22ap (for /product); see docs/status.md")
@@ -138,7 +141,7 @@ def main(argv=None):
 
     adt, mkadt, mkpayload = load_topaz(a.topaz)
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    adt_blob = build_adt(adt, mkadt, 6, ufs=a.ufs, d22ap=a.d22ap)
+    adt_blob = build_adt(adt, mkadt, a.ncpu, ufs=a.ufs, d22ap=a.d22ap)
     adt_path = a.out + ".adt"
     open(adt_path, "wb").write(adt_blob)
     cmdline = a.cmdline or DEFAULT_CMDLINE.format(cpus=a.cpus)

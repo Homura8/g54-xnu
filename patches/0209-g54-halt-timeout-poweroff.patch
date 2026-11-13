@@ -1,0 +1,48 @@
+G54: on a halt/restart timeout, sync and power off/restart instead of panicking.
+
+iOS teardown on the G54 can stall indefinitely (launchd waiting on services,
+ifnet_detach_final waiting on utun2; g54-xnu E37/E37b), so IOKit's halt timer
+(30 s, halt_restart_timeout=<s> on DEVELOPMENT) panicked into Fastboot.
+On SWEET the timer now calls sync_internal() and then the platform's
+haltRestart (0207: PSCI SYSTEM_OFF/SYSTEM_RESET); it panics only if that
+returns.
+
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index 7a32a23..aad71ac 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -868,6 +868,9 @@ getCStringForObject(OSObject *inObj, char *outStr, size_t outStrLen)
+ 	}
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern "C" int sync_internal(void);
++#endif
+ /* IOShutdownNotificationsTimedOut
+  * - Called from a timer installed by PEHaltRestart
+  */
+@@ -879,7 +882,23 @@ IOShutdownNotificationsTimedOut(
+ 	thread_call_param_t p0,
+ 	thread_call_param_t p1)
+ {
+-#if !defined(__x86_64__)
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/*
++	 * G54: iOS teardown on this hardware can stall (launchd waiting on
++	 * services, ifnet_detach_final waiting on utun2: g54-xnu E37b) and
++	 * the old panic left the phone in Fastboot. Sync the filesystems and
++	 * power off / restart through the platform (PSCI) instead.
++	 */
++	{
++		int g54_type = (int)(long)p0;
++		IOLog("G54: halt/restart timed out; syncing and forcing it\n");
++		(void)sync_internal();
++		if (gIOPlatform) {
++			gIOPlatform->haltRestart(g54_type);
++		}
++	}
++	panic("Halt/Restart Timed Out");
++#elif !defined(__x86_64__)
+ 	/* 30 seconds has elapsed - panic */
+ 	panic("Halt/Restart Timed Out");
+ 

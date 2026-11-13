@@ -49,51 +49,52 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## ▶ Resume here (handoff, 13 November 2026 04:35 UTC)
+## ▶ Resume here (handoff, 13 November 2026 12:45 UTC)
 
-**State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~3 min with **real
-touch and all three side keys** (E26, E28). Phone has **E29** on `boot_a`
-(flashed 04:32:25 UTC): kernel **K4** (CI 43363468664, `6b7ddff8…`, patches
-0200–0203), cmdline E28's (`… sweetfb_noconsole=1 g54nvt=1 g54keys=1`),
-probe `out/g1-lastlog` (touch firmware download + dot test, VRAM clear
-before the jump, **LASTLOG page**). The gated CI run 43364654526 (`00ace74`,
-same code as K4, 0203 hooks moved) passed. PR #7 is open, not merged.
+**State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~2–3 min on **all
+eight CPUs** (six A55 + two A78, E35) with **real touch, all three side keys**
+(E26, E28) and **no press-linked power-off** (E30–E32: the key driver
+acknowledges MT6363 interrupts). Debug squares are gone (0204). The UI is
+still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**E29 result ([run card](experiments/2026-11-13-e29-lastlog.md)):** the LASTLOG
-page works; Power + Volume Down is a warm reset (clean log), but the
-**press-linked spontaneous reset is a cold PMIC power cycle** (the previous
-log came back bit-decayed). Next: read the MT6363 long-press/power-off and
-key-interrupt registers through SWINF 2 and compare with what Android's
-`mtk-pmic-keys` sets up. Also seen: `bluetoothd`/`fairplayd.h2` relaunch loop.
+**Phone:** `boot_a` holds **E37b** (kernel K10, `halt_restart_timeout=0`);
+stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
-**How E29 works:** each boot first shows "LAST BOOT LOG" for 25 s:
-the tail of the *previous* boot's kernel console, read from RAM
-(`sweet_log_ring` PA `0x141c765f8`, `sweet_log_total` PA `0x141c765f0`, valid
-for K4 only; recompute with `llvm-nm` + `PA = VA - 0xfffffe0006000000 +
-0x140000000` for any other kernel). Ask the owner to press the keys in iOS,
-wait for the spontaneous reset (issue #7), and photograph the LAST BOOT LOG
-page of the following boot. "NO VALID RING"/garbage means a cold reset
-(RAM lost). Write the E29 run card from that.
+**Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
+touch (`g54nvt=1`), 0203 keys + PMIC interrupt ack (`g54keys=1`), 0204 no
+debug markers, 0205 layer blending (no visible effect; iOS presents one
+layer), 0206 `g54noexec=a,b` (refuse crash-looping daemons), 0207 PSCI
+CPU_OFF/SYSTEM_OFF/SYSTEM_RESET, 0208 skip the HFS+ root unmount at halt,
+**0209 sync + power off when the halt timer expires — built by CI (K11) but
+not yet tested on the phone.**
 
-**Rebuild E29:** probe `python3 scripts/g54_payload.py build --out
-out/g1-lastlog -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW -D NO_RESV -D
-LOADER_S=5 -D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0`; image
-`scripts/g54_xnu_image.py --topaz out/topaz --kernel out/k4/kernel.development.sweet
---stock out/fw/boot.img --probe out/g1-lastlog --ufs --d22ap out/ipsw/d22ap.adt
---touch-fw out/touch/novatek_ts_fw.bin --cmdline "<E28 cmdline>" --out …`
-(`novatek_ts_fw.bin` is extracted locally from vendor_dlkm firmware, never
-committed). Local kernel tree with the full patch stack: `out/kxnu` (Apple
-xnu-8796.141.3 + `out/kbase/xnu/patches`), used to write and regenerate
-patches; each G54 patch must also reverse-apply on its own (CI gate).
+**Best boot line (E37 + 0209):** `debug=0xc serial=3 cpus=8 keepsyms=1
+-noprogress rd=ufsroot0 ufsrw=1 rootrw=1 launchd_unsecure_cache=1
+unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1
+wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
+dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
+g54noexec=bluetoothd,fairplayd.H2 halt_restart_timeout=60`.
+Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K11>
+--stock out/fw/boot.img --probe out/g1-fast --ufs --d22ap
+out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
+--cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
+--out out/g1-fast -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
+-D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1 -D LASTLOG_S=8
+-D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0` (ring addresses are
+unchanged K4–K11; recompute with `llvm-nm` if a kernel changes them).
 
-**Lessons this session:** never use PMIF SWINF 0 (E27: touch lost); the AP's
-channel is SWINF 2 (`regs[25 + 5*soc_chan]`, soc_chan 2). The Novatek report
-is big-endian 16-bit x/y in 4320×9600 units with a checksum (stock
-`nvt_ts_work_func`). Stock module disassembly (`out/vb/rd/lib/modules`,
-`out/dlkm`) answered every register question faster than guessing.
+**Next, in order:** (1) **E38** = K11 + the boot line above: Settings → Shut
+Down should power off ~60 s after the slide (0209) — first test; (2) issue
+#14 volume-up + power wedges SpringBoard; #9/#13 About hangs, Storage crashes
+(need logs: the LASTLOG page after a forced restart); (3) performance (GPU-less
+rendering is the real limit); (4) RTC, battery, backlight.
 
-**Next, in order:** (1) MT6363 key/long-press registers → cause of the press-linked cold reset;
-(2) composition/fps issues (#6, #8, #10); (3) RTC, battery, backlight.
+**Process lessons:** never use PMIF SWINF 0 (AP = SWINF 2); any push to the PR
+branch cancels the running kernel build (`cancel-in-progress`), so batch
+docs pushes; gate every flash on `product=cancunf`, slot `a`; stock module
+disassembly (`out/vb/rd/lib/modules`, `out/dlkm`) answers register questions
+fastest; several agents may share this checkout: work on your own branch or
+worktree and commit explicit paths only.
 
 ## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 usable by touch and keys on the G54
 
@@ -126,11 +127,14 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
 | 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |
 | 6 | **Composition glitches**: red clock, no wallpaper, white dock, blank widgets | May share one cause (owner's suggestion): missing/incorrect blending or colour format in the software compositor (alpha/premultiplied, BGRA vs RGBA, or CoreAnimation falling back without GPU). Compare with ruby's/topaz screenshots and the SweetFramebuffer pixel format before changing anything |
-| 7 | **Spontaneous restart** after a few minutes (E18, E21) | **Linked to button presses** (E27: same image reset after presses, booted cleanly without; owner saw the same on E18/E21). The reset is below XNU (normal boot, not the loader's Fastboot route). Suspect the MT6363 key long-press/interrupt state (stock regs 0x90f, 0xa0e, 0xa0f); **E28: still resets after presses with the kernel driver on SWINF 2**, so not our channel. E29's probe shows the previous boot's kernel console from RAM (`LASTLOG`) to see what happened before the reset **E29: it is a cold PMIC power cycle** (previous-boot RAM log bit-decayed; warm resets keep it clean) |
-| 8 | **~5 fps UI and screen tearing** (E26) | Software presentation path (IOSurface copy to the LK scanout, no vsync/double buffering). Likely related to #6 |
-| 9 | **Settings → General → About does not load** (E26) | Probably a missing service/property (MobileGestalt, baseband, storage); needs logs |
+| 7 | ~~**Spontaneous restart**~~ **fixed in [E32](experiments/2026-11-13-e32-pmic-ack-ios.md)** after a few minutes (E18, E21) | **Linked to button presses** (E27: same image reset after presses, booted cleanly without; owner saw the same on E18/E21). The reset is below XNU (normal boot, not the loader's Fastboot route). Suspect the MT6363 key long-press/interrupt state (stock regs 0x90f, 0xa0e, 0xa0f); **E28: still resets after presses with the kernel driver on SWINF 2**, so not our channel. E29's probe shows the previous boot's kernel console from RAM (`LASTLOG`) to see what happened before the reset **E29: it is a cold PMIC power cycle** (previous-boot RAM log bit-decayed; warm resets keep it clean). **Owner, 13 November: on battery (no USB power) the same key presses lead, a few minutes later, to a full shutdown instead of a restart; on power-up the log is gone.** So the PMIC powers off after an unserviced key event and only restarts when external power is present. Fix next session (MT6363 key/long-press/interrupt registers) **Cause found and fixed in the probe ([E30](experiments/2026-11-13-e30-pmic-diff.md), [E31](experiments/2026-11-13-e31-pmic-ack.md)):** a power press starts a ~79 s MT6363 countdown (`0xa15–0xa17`) unless the interrupt is acknowledged like the stock PMIC IRQ handler does (write back `0x91b`/`0x91c`, then `0x41b = 1`). Kernel 0203 does this (K5); **E32: keys pressed in iOS, unplugged, phone stays on** |
+| 8 | **~5 fps UI and screen tearing** (E26) | E33–E35 ([run card](experiments/2026-11-13-e33-e35-performance.md)): the panel copy was 10 Hz (`sweetfb_hz=30` helps scrolling only); the A55s already run at 2 GHz; **adding the two A78s (`--ncpu 8 cpus=8`) made iOS noticeably faster (~8 fps)**. Remaining cost: software rendering with no GPU; `bluetoothd`/`fairplayd.H2` relaunch loop (kernel 0206 `g54noexec`) |
+| 9 | **Settings → General → About hangs Settings** (E26, E35) | Tapping About never opens the pane; Settings hangs until force-quit (owner). Probably a blocking call to a missing service (MobileGestalt/baseband/storage, cf. #13); needs logs |
 | 10 | **Blur turns solid white after transitions** in App Library and app switcher; Control Center blur is fine (E26) | Composition: static blur layers cached/rendered differently from animated ones; probably the same root as #6 |
 | 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
+| 12 | **"Slide to power off" panics → Fastboot** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). [E36b](experiments/2026-11-13-e36-shutdown.md): shutdown then stalled at `unmount(0) /` (HFS+ root on SWEET UFS) → 30 s `Halt/Restart Timed Out` panic; kernel 0208 skips the root unmount at halt. E37/E37b: iOS teardown itself stalls (launchd waiting on services, `ifnet_detach_final` waiting on `utun2`); kernel 0209 syncs and powers off when the halt timer (`halt_restart_timeout=60`) expires. Device test pending |
+| 13 | **Settings → General → Storage crashes Settings** (E35) | Unknown; needs the crash log (LASTLOG page after a crash, or launchd output) |
+| 14 | **Volume up + power (power-off menu gesture) wedges SpringBoard** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile |
 
 ## Previous: fast boot to the iOS lock screen
 
