@@ -1,0 +1,375 @@
+G54: polled Novatek NT36672C touch over SPI3 (boot-arg g54nvt=1).
+
+The g54-xnu probe downloads the flashless firmware before XNU starts
+(g54-xnu docs/experiments E24). This driver maps SPI3 (0x11013000), checks
+the trim ID and reset state, then polls the event buffer 0x22d00 every
+g54nvtms (default 8) ms and feeds up to ten fingers to sweet_hid_touch(),
+scaled from the firmware's abs_x/y_max to 1080x2400. Off by default; no IRQ,
+firmware download or watchdog recovery yet.
+diff --git a/bsd/conf/files b/bsd/conf/files
+index c604511..f9509b8 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -114,6 +114,7 @@ bsd/dev/ruby_irq.c			standard
+ bsd/dev/ruby_spi3.c			standard
+ bsd/dev/sweet_touch.c			standard
+ bsd/dev/sweet_goodix_spi.c		standard
++bsd/dev/g54_nvt_touch.c			standard
+ bsd/dev/ruby_usb.c			standard
+ bsd/dev/ruby_probe.c			standard
+ bsd/dev/ruby_battery.c			standard
+diff --git a/bsd/dev/g54_nvt_touch.c b/bsd/dev/g54_nvt_touch.c
+new file mode 100644
+index 0000000..9a532e1
+--- /dev/null
++++ b/bsd/dev/g54_nvt_touch.c
+@@ -0,0 +1,329 @@
++/*
++ * G54 (Moto G54, MT6855): Novatek NT36672C touch over SPI3, polled.
++ *
++ * The chip is a flashless TDDI. The g54-xnu probe downloads its firmware
++ * before XNU starts (g54-xnu docs/experiments E24: reset state 0xA1,
++ * version 07/F8), so this driver only reads finger reports:
++ *
++ *   kernel thread (g54nvtms, default 8 ms)
++ *     -> SPI3 0x11013000 FIFO transfers (<= 32 bytes, ruby_spi3.c order)
++ *     -> Novatek event buffer 0x22d00 (NT36675 memory map, chosen by the
++ *        stock driver's trim table for ID 0C xx xx 72 66 03)
++ *     -> finger i at EVT + 6i: id = b0 >> 3, status = b0 & 7 (1/2 down),
++ *        x = b1 << 4 | b3 >> 4, y = b2 << 4 | b3 & 0xf
++ *     -> sweet_hid_touch(id - 1, down, x * 1080 / xmax, y * 2400 / ymax)
++ *
++ * Pins (GPIO73-76 function 2), reset GPIO3 and the SPI3 clock gate are left
++ * as LK and the probe set them; only the SPI3 controller is programmed.
++ * Enabled by boot-arg g54nvt=1 (default off). No firmware download, no IRQ
++ * (EINT22) and no ESD/watchdog recovery yet: a chip report of FD FD FD
++ * (watchdog) or FE FE FE (recovery) is only counted and logged.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <libkern/libkern.h>
++#include <mach/mach_time.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++
++#define NVT_SPI3_PA     0x11013000u
++#define NVT_PERAO_PA    0x11036000u
++#define S_CFG0          0x00
++#define S_CFG1          0x04
++#define S_TX            0x10
++#define S_RX            0x14
++#define S_CMD           0x18
++#define S_ST0           0x1c
++#define S_PAD           0x24
++#define S_CFG2          0x28
++#define C_ACT           (1u << 0)
++#define C_RST           (1u << 2)
++#define C_PAUSE         (1u << 4)
++#define C_MSB           ((1u << 12) | (1u << 13))
++
++#define NVT_EVT         0x22d00u
++#define NVT_TRIM        0x3f004u
++#define NVT_FINGERS     10
++#define NVT_REPORT      (NVT_FINGERS * 6 + 1)
++#define NVT_CHUNK       28u
++
++static struct {
++	volatile uint32_t *spi;
++	uint32_t xmax, ymax;
++	uint32_t period_ms;
++	uint32_t page;
++	bool down[NVT_FINGERS];
++	uint64_t frames, spi_err, wdt, recovery, touches;
++	bool started;
++} nvt;
++
++static int nvt_sleep_chan;
++
++static inline uint32_t
++nvt_rd(uint32_t off)
++{
++	return nvt.spi[off / 4];
++}
++
++static inline void
++nvt_wr(uint32_t off, uint32_t v)
++{
++	nvt.spi[off / 4] = v;
++}
++
++static void
++nvt_wait_ms(unsigned ms)
++{
++	uint64_t deadline;
++
++	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
++	(void)assert_wait_deadline(&nvt_sleep_chan, THREAD_UNINT, deadline);
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++/* One FIFO transfer of len <= 32 bytes (ruby_spi3.c / probe spi_xfer). */
++static int
++nvt_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len)
++{
++	uint64_t end, now;
++	int ok = 0;
++
++	nvt_wr(S_CMD, C_RST);
++	nvt_wr(S_CMD, 0);
++	nvt_wr(S_CMD, C_MSB);
++	nvt_wr(S_PAD, 0);
++	nvt_wr(S_CFG1, (nvt_rd(S_CFG1) & ~(0xff00u | 0x3ff0000u)) | ((len - 1) & 0x3ff) << 16);
++	for (uint32_t i = 0; i < len; i += 4) {
++		uint32_t w = 0;
++		for (uint32_t j = 0; j < 4 && i + j < len; j++) {
++			w |= (uint32_t)tx[i + j] << (8 * j);
++		}
++		nvt_wr(S_TX, w);
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	nvt_wr(S_CMD, C_MSB | C_ACT);
++	nanoseconds_to_absolutetime(2 * NSEC_PER_MSEC, &end);
++	end += mach_absolute_time();
++	do {
++		if (nvt_rd(S_ST0) & 1) {
++			ok = 1;
++			break;
++		}
++		now = mach_absolute_time();
++	} while (now < end);
++	if (ok && rx) {
++		for (uint32_t i = 0; i < len; i += 4) {
++			uint32_t w = nvt_rd(S_RX);
++			for (uint32_t j = 0; j < 4 && i + j < len; j++) {
++				rx[i + j] = (uint8_t)(w >> (8 * j));
++			}
++		}
++	}
++	nvt_wr(S_CMD, C_MSB | C_PAUSE);
++	if (!ok) {
++		nvt.spi_err++;
++	}
++	return ok;
++}
++
++static int
++nvt_set_page(uint32_t a)
++{
++	uint8_t tx[3] = { 0xff, (uint8_t)(a >> 15), (uint8_t)(a >> 7) };
++
++	if (nvt.page == (a & ~0x7fu)) {
++		return 1;
++	}
++	if (!nvt_xfer(tx, NULL, 3)) {
++		nvt.page = 0;
++		return 0;
++	}
++	nvt.page = a & ~0x7fu;
++	return 1;
++}
++
++/* Read n bytes at chip address a (within one 128-byte page). */
++static int
++nvt_read(uint32_t a, uint8_t *out, uint32_t n)
++{
++	uint8_t tx[32], rx[32];
++
++	if (!nvt_set_page(a)) {
++		return 0;
++	}
++	while (n) {
++		uint32_t c = n > NVT_CHUNK ? NVT_CHUNK : n;
++		bzero(tx, sizeof(tx));
++		tx[0] = (uint8_t)(a & 0x7f);
++		if (!nvt_xfer(tx, rx, c + 2)) {
++			return 0;
++		}
++		memcpy(out, rx + 2, c);
++		out += c;
++		a += c;
++		n -= c;
++	}
++	return 1;
++}
++
++static void
++nvt_release_all(void)
++{
++	for (int i = 0; i < NVT_FINGERS; i++) {
++		if (nvt.down[i]) {
++			sweet_hid_touch(i, 0, 0, 0);
++			nvt.down[i] = false;
++		}
++	}
++}
++
++static void
++nvt_frame(void)
++{
++	uint8_t d[NVT_REPORT + 3];
++	bool seen[NVT_FINGERS] = { false };
++
++	if (!nvt_read(NVT_EVT, d, NVT_REPORT)) {
++		return;
++	}
++	nvt.frames++;
++	if (d[0] == 0xfd && d[1] == 0xfd && d[2] == 0xfd) {
++		if (nvt.wdt++ < 4) {
++			printf("G54 NVT: chip watchdog report (FD FD FD), no recovery yet\n");
++		}
++		nvt_release_all();
++		return;
++	}
++	if (d[0] == 0xfe && d[1] == 0xfe && d[2] == 0xfe) {
++		if (nvt.recovery++ < 4) {
++			printf("G54 NVT: chip recovery report (FE FE FE), no recovery yet\n");
++		}
++		nvt_release_all();
++		return;
++	}
++	for (int i = 0; i < NVT_FINGERS; i++) {
++		const uint8_t *p = d + 6 * i;
++		uint32_t id = p[0] >> 3, st = p[0] & 7;
++		if (id < 1 || id > NVT_FINGERS || (st != 1 && st != 2)) {
++			continue;
++		}
++		uint32_t x = ((uint32_t)p[1] << 4) | (p[3] >> 4);
++		uint32_t y = ((uint32_t)p[2] << 4) | (p[3] & 0xf);
++		int f = (int)id - 1;
++		if (seen[f]) {
++			continue;
++		}
++		seen[f] = true;
++		if (!nvt.down[f] && nvt.touches++ < 3) {
++			printf("G54 NVT: finger %d down raw %u,%u\n", f, x, y);
++		}
++		nvt.down[f] = true;
++		sweet_hid_touch(f, 1, (int)(x * 1080 / nvt.xmax), (int)(y * 2400 / nvt.ymax));
++	}
++	for (int i = 0; i < NVT_FINGERS; i++) {
++		if (nvt.down[i] && !seen[i]) {
++			nvt.down[i] = false;
++			sweet_hid_touch(i, 0, 0, 0);
++		}
++	}
++}
++
++static void
++nvt_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	uint8_t id[8] = { 0 }, st[4] = { 0 }, info[16] = { 0 };
++	uint64_t next_log = 0;
++
++	/* Moderate clock: sck low/high 9 (<= 9.6 MHz for a 192 MHz source). */
++	nvt_wr(S_CMD, C_RST);
++	nvt_wr(S_CMD, 0);
++	nvt_wr(S_PAD, 0);
++	nvt_wr(S_CMD, C_MSB);
++	nvt_wr(S_CFG2, (9u << 16) | 9u);
++	nvt_wr(S_CFG0, (15u << 16) | 15u);
++	nvt_wr(S_CFG1, (nvt_rd(S_CFG1) & ~0xffu) | 15u);
++	nvt_wr(S_CMD, C_MSB | C_PAUSE);
++
++	int r0 = nvt_read(NVT_TRIM, id, 6);
++	int r1 = nvt_read(NVT_EVT + 0x60, st, 1);
++	int r2 = nvt_read(NVT_EVT + 0x78, info, 10);
++	nvt.xmax = ((uint32_t)info[4] << 8) | info[5];
++	nvt.ymax = ((uint32_t)info[6] << 8) | info[7];
++	if (nvt.xmax < 100 || nvt.xmax > 20000) {
++		nvt.xmax = 1080;
++	}
++	if (nvt.ymax < 100 || nvt.ymax > 40000) {
++		nvt.ymax = 2400;
++	}
++	printf("G54 NVT: id %d %02x %02x %02x %02x %02x %02x state %d %02x fw %d %02x/%02x "
++	    "max %u x %u, poll %u ms\n", r0, id[0], id[1], id[2], id[3], id[4], id[5],
++	    r1, st[0], r2, info[0], info[1], nvt.xmax, nvt.ymax, nvt.period_ms);
++	if (!r0 || id[3] != 0x72 || id[4] != 0x66 || id[5] != 0x03) {
++		printf("G54 NVT: no NT36672-family chip, stopping\n");
++		goto out;
++	}
++	if (st[0] < 0xa0 || st[0] > 0xaf) {
++		printf("G54 NVT: firmware not running (probe without TOUCH_FW?), polling anyway\n");
++	}
++	for (;;) {
++		nvt_frame();
++		if (mach_absolute_time() > next_log) {
++			uint64_t t;
++			if (next_log) {
++				printf("G54 NVT: frames %llu touches %llu spi_err %llu wdt %llu rec %llu\n",
++				    nvt.frames, nvt.touches, nvt.spi_err, nvt.wdt, nvt.recovery);
++			}
++			nanoseconds_to_absolutetime(60ull * NSEC_PER_SEC, &t);
++			next_log = mach_absolute_time() + t;
++		}
++		nvt_wait_ms(nvt.period_ms);
++	}
++out:
++	(void)thread_terminate(current_thread());
++	thread_block(THREAD_CONTINUE_NULL);
++}
++
++void g54_nvt_touch_init(void);
++
++void
++g54_nvt_touch_init(void)
++{
++	int on = 0, ms = 8;
++	thread_t thread;
++	volatile uint32_t *perao;
++
++	if (nvt.started) {
++		return;
++	}
++	nvt.started = true;
++	if (!PE_parse_boot_argn("g54nvt", &on, sizeof(on)) || on != 1) {
++		return;
++	}
++	if (PE_parse_boot_argn("g54nvtms", &ms, sizeof(ms)) && (ms < 2 || ms > 100)) {
++		ms = 8;
++	}
++	nvt.period_ms = (uint32_t)ms;
++	nvt.spi = (volatile uint32_t *)ml_io_map(NVT_SPI3_PA, 0x1000);
++	perao = (volatile uint32_t *)ml_io_map(NVT_PERAO_PA, 0x1000);
++	if (!nvt.spi || !perao) {
++		printf("G54 NVT: mapping failed\n");
++		return;
++	}
++	perao[0x2c / 4] = 1u << 14;     /* ungate peraop_spi3_bclk (already on after LK) */
++	if (kernel_thread_start(nvt_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		printf("G54 NVT: thread start failed\n");
++	}
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 61498c9..c46f87f 100644
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -53,6 +53,7 @@ extern void sweet_sample_start(void);
+ extern void sweet_keys_init(void);
+ extern void ruby_keys_init(void);
+ extern void sweet_touch_init(void);
++extern void g54_nvt_touch_init(void);
+ extern void sweet_goodix_spi_kick(void);
+ extern void sweet_usb_probe(void);
+ extern void ruby_usb_probe(void);
+@@ -706,6 +707,7 @@ sweet_ufs_init(void)
+ 	if (PE_parse_boot_argn("rubkeys", &keys, sizeof(keys)) && keys == 1)
+ 		ruby_keys_init();
+ 	sweet_goodix_spi_kick();
++	g54_nvt_touch_init();	/* G54 Novatek touch, boot-arg g54nvt=1 */
+ 	return 0;
+ }
+ 

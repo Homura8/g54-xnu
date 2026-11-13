@@ -1309,30 +1309,49 @@ static void touch_fw(void)
     kv("BAR", info[1], 2);
     puts_("\n", WHITE);
 
-    /* 15 s touch test: finger 1 = bytes 1..6 of the event buffer. */
-    puts_(" TOUCH THE SCREEN (15 S)\n", GREEN);
+    /* Firmware info (EVT+0x78): ver, ~ver, x_num, y_num, abs_x_max (BE), abs_y_max (BE). */
+    u32 xmax = ((u32)info[4] << 8) | info[5], ymax = ((u32)info[6] << 8) | info[7];
+    puts_(" INFO", GREEN);
+    for (int i = 0; i < 10; i++)
+        puts_(" ", WHITE), hex(info[i], 2, WHITE);
+    puts_("\n", WHITE);
+    if (xmax < 100 || xmax > 20000)
+        xmax = 1080;
+    if (ymax < 100 || ymax > 40000)
+        ymax = 2400;
+
+    /*
+     * 20 s touch test. Novatek's driver reads point_data[0] = address byte,
+     * then data from EVT+0, and finger i at point_data[1 + 6i]: finger 1 is
+     * EVT+0..5 (E24 parsed from EVT+1). Raw bytes are shown when they change.
+     */
+    puts_(" TOUCH THE SCREEN (20 S)\n", GREEN);
     u32 lx = cx, ly = cy;
-    u64 end = ticks() + 15 * freq();
+    u64 end = ticks() + 20 * freq();
+    u8 last[14] = {0};
     u32 n = 0;
     while (ticks() < end) {
-        u8 e[8] = {0};
-        nvt_read(EVT, e, 7);
-        u32 id = e[1] >> 3, sts = e[1] & 7;
+        u8 e[16] = {0};
+        nvt_read(EVT, e, 14);
+        u32 id = e[0] >> 3, sts = e[0] & 7;
         if (id >= 1 && id <= 10 && (sts == 1 || sts == 2)) {
-            u32 x = ((u32)e[2] << 4) | (e[4] >> 4), y = ((u32)e[3] << 4) | (e[4] & 0xf);
-            dot(x, y, 0xffffff00U);                /* yellow dot where touched */
-            if ((n++ & 15) == 0) {
-                cx = lx;
-                cy = ly;
-                puts_(" ", WHITE);
-                kv("ID", id, 1);
-                kv("X", x, 4);
-                kv("Y", y, 4);
-                puts_("   ", WHITE);
-            }
+            u32 x = ((u32)e[1] << 4) | (e[3] >> 4), y = ((u32)e[2] << 4) | (e[3] & 0xf);
+            dot(x * 1080 / xmax, y * 2400 / ymax, 0xffffff00U);   /* yellow dot */
+        }
+        int diff = 0;
+        for (int i = 0; i < 14; i++)
+            if (e[i] != last[i])
+                diff = 1, last[i] = e[i];
+        if (diff && (n++ & 3) == 0) {
+            cx = lx;
+            cy = ly;
+            puts_(" EV", WHITE);
+            for (int i = 0; i < 12; i++)
+                puts_(" ", WHITE), hex(e[i], 2, WHITE);
+            puts_("  ", WHITE);
         }
         kick();
-        delay_us(16000);
+        delay_us(10000);
     }
     cx = 0;
     cy = ly + 36;
