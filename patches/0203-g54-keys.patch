@@ -9,17 +9,17 @@ mtk-pmic-keys.ko and spmi-mtk-pmif.ko, checked live by the g54-xnu probe
 through sweet_hid_key(). The PMIC is only read. Off by default.
 
 diff --git a/bsd/conf/files b/bsd/conf/files
-index f9509b8..825fa14 100644
+index f9509b8..ce5d8ee 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -115,6 +115,7 @@ bsd/dev/ruby_spi3.c			standard
- bsd/dev/sweet_touch.c			standard
- bsd/dev/sweet_goodix_spi.c		standard
- bsd/dev/g54_nvt_touch.c			standard
+@@ -105,6 +105,7 @@ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
 +bsd/dev/g54_keys.c			standard
- bsd/dev/ruby_usb.c			standard
- bsd/dev/ruby_probe.c			standard
- bsd/dev/ruby_battery.c			standard
+ bsd/dev/sweet_sample.c			standard
+ bsd/dev/sweet_keys.c			standard
+ bsd/dev/ruby_keys.c			standard
 diff --git a/bsd/dev/g54_keys.c b/bsd/dev/g54_keys.c
 new file mode 100644
 index 0000000..db208ed
@@ -195,22 +195,17 @@ index 0000000..db208ed
 +
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index c46f87f..796282d 100644
+index c46f87f..2eaecbd 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -54,6 +54,7 @@ extern void sweet_keys_init(void);
- extern void ruby_keys_init(void);
- extern void sweet_touch_init(void);
- extern void g54_nvt_touch_init(void);
-+extern void g54_keys_init(void);
- extern void sweet_goodix_spi_kick(void);
- extern void sweet_usb_probe(void);
- extern void ruby_usb_probe(void);
-@@ -708,6 +709,7 @@ sweet_ufs_init(void)
- 		ruby_keys_init();
- 	sweet_goodix_spi_kick();
- 	g54_nvt_touch_init();	/* G54 Novatek touch, boot-arg g54nvt=1 */
-+	g54_keys_init();	/* G54 side keys, boot-arg g54keys=1 */
- 	return 0;
- }
- 
+@@ -693,6 +693,10 @@ sweet_ufs_init(void)
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	sweet_log_start();
+ 	sweet_sample_start();
++	{
++		extern void g54_keys_init(void);
++		g54_keys_init();	/* G54 side keys, boot-arg g54keys=1 */
++	}
+ 	/* Input drivers (HID services in iokit/Kernel/arm/hid/SweetHID.cpp). */
+ 	int hw = 0;
+ 	PE_parse_boot_argn("sweethw", &hw, sizeof(hw));
