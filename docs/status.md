@@ -133,6 +133,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
 | 12 | **"Slide to power off" panics → Fastboot** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). Device test pending |
 | 13 | **Settings → General → Storage crashes Settings** (E35) | Unknown; needs the crash log (LASTLOG page after a crash, or launchd output) |
+| 14 | **Volume up + power (power-off menu gesture) wedges SpringBoard** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile |
 
 ## Previous: fast boot to the iOS lock screen
 
