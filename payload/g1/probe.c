@@ -1837,6 +1837,71 @@ static void reboot_bootloader(void)
 }
 
 
+
+#ifdef CPU_FREQ
+/*
+ * E34: CPU DVFS through MediaTek cpufreq-hw (stock DTB performance-controller,
+ * "mediatek,cpufreq-hw": domain 0 = A55 x6 at 0x0011bc10, domain 1 = A78 x2 at
+ * 0x0011bd30). Mainline mediatek-cpufreq-hw layout: LUT at +0 (u32 per level,
+ * bits 11:0 = MHz), ENABLE +0x84, PERF_STATE +0x88 (requested level index),
+ * HW_STATE +0x8c. Nothing on our side sets a level, so iOS ran at whatever
+ * LK left (E33: ~5 fps animations). Measures CPU0's real clock with the PMU
+ * cycle counter before and after requesting the fastest level, which then
+ * persists into XNU. Runtime DVFS state only (MCUPM sets the voltage).
+ */
+static const u64 cf_dom[2] = {0x0011bc10UL, 0x0011bd30UL};
+
+static u32 cpu0_mhz(void)
+{
+    u64 c0, c1;
+    __asm__ volatile("msr pmcr_el0, %0" ::"r"((u64)((1U << 6) | 1U)));  /* LC | E */
+    __asm__ volatile("msr pmcntenset_el0, %0" ::"r"((u64)1U << 31));
+    __asm__ volatile("isb; mrs %0, pmccntr_el0" : "=r"(c0));
+    u64 t0 = ticks(), t1 = t0 + freq() / 20;          /* 50 ms */
+    while (ticks() < t1)
+        ;
+    __asm__ volatile("isb; mrs %0, pmccntr_el0" : "=r"(c1));
+    return (u32)((c1 - c0) * 20 / 1000000);
+}
+
+static void cpu_freq(void)
+{
+    puts_("CPU FREQ (CPUFREQ-HW)\n", GREEN);
+    kv(" CPU0 MHZ", cpu0_mhz(), 4);
+    puts_("\n", WHITE);
+    u32 best[2] = {0, 0}, bestmhz[2] = {0, 0};
+    for (int d = 0; d < 2; d++) {
+        u64 b = cf_dom[d];
+        puts_(d ? " BIG " : " LITTLE ", GREEN);
+        kv("EN", r32(b + 0x84), 2);
+        kv("PERF", r32(b + 0x88), 2);
+        kv("HW", r32(b + 0x8c), 2);
+        puts_("LUT", GREY);
+        for (u32 i = 0; i < 32; i++) {
+            u32 mhz = r32(b + 4 * i) & 0xfff;
+            if (!mhz)
+                break;
+            if (mhz > bestmhz[d])
+                bestmhz[d] = mhz, best[d] = i;
+            if (i < 4 || (i & 3) == 0)
+                puts_(" ", WHITE), hex(mhz, 3, WHITE);
+        }
+        puts_("\n", WHITE);
+    }
+    for (int d = 0; d < 2; d++)
+        if (r32(cf_dom[d] + 0x84) == 1 && bestmhz[d])
+            w32(cf_dom[d] + 0x88, best[d]);
+    delay_us(20000);
+    puts_(" SET MAX: ", GREEN);
+    kv("L", best[0], 2);
+    kv("HW", r32(cf_dom[0] + 0x8c), 2);
+    kv("B", best[1], 2);
+    kv("HW", r32(cf_dom[1] + 0x8c), 2);
+    kv("CPU0 MHZ NOW", cpu0_mhz(), 4);
+    puts_("\n", WHITE);
+}
+#endif /* CPU_FREQ */
+
 #ifdef LASTLOG_RING
 /*
  * Previous boot's kernel console, read from RAM before the loader overwrites
@@ -1944,6 +2009,9 @@ void probe_main(u64 dtb, u64 pc)
 #endif
 #ifdef PMIC_DIFF
     pmic_diff_test();
+#endif
+#ifdef CPU_FREQ
+    cpu_freq();
 #endif
     if (pl) {
         puts_("\nSWEETXNU PAYLOAD AT ", GREEN);
