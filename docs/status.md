@@ -49,7 +49,15 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## Latest (13 November 2026 UTC): fast boot to the iOS lock screen
+## 🎉 Milestone (13 November 2026 UTC): iOS 16.7.16 home screen on the G54
+
+[E21](experiments/2026-11-13-e21-home-screen.md): E20 plus ruby's synthetic
+swipe-up reached **SpringBoard's home screen** (owner photo: Photos, App
+Store, Settings, widgets, dock with Phone/Safari/Messages, 4:04). Boot is
+about 3 minutes. Open items: no real input (touch/keys), spontaneous restart
+after a few minutes with no panic text, no log channel. See E21 "Next".
+
+## Previous: fast boot to the iOS lock screen
 
 [E20](experiments/2026-11-13-e20-ufs-hs.md) restored UFS HS-G3 (probe
 `-D UFS_HS`) and muted the console over iOS (`sweetfb_noconsole=1`):

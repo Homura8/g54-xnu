@@ -141,3 +141,8 @@ Before anything other than read-only commands: save the stock `boot`,
 `vendor_boot`, `init_boot`, `dtbo`, `vbmeta*` and `lk*` images for the current
 slot, record their SHA-256 here (never commit the images), and confirm that the
 recovery path restores them. Unlocking normally wipes user data.
+
+## Proven on the G54 (13 November 2026)
+
+- UFS HS-G3, 2+2 lanes, rate B after the probe's reset/link/fDeviceInit (E20); device max RX HS gear 3, host 3.
+- iOS 16.7.16 SpringBoard home screen with the K2 kernel, six A55s and the E15 root (E21, owner photo).
