@@ -49,7 +49,15 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## ▶ Resume here (handoff, 14 November 2026 08:20 UTC)
+## ▶ Resume here (handoff, 14 November 2026 14:30 UTC)
+
+**New: USB serial console ([E42–E47](experiments/2026-11-14-e42-e47-usb-console.md), kernel patch 0210).**
+With `g54usb=1 g54usbfs=1` the G54 appears on the host as a CDC-ACM serial
+port (`1209:0003`; Windows "USB Serial Device (COMn)", no driver install).
+Opening it replays the whole log ring, then follows it live:
+`powershell -ExecutionPolicy Bypass -File scripts\g54_console.ps1 -Out out\usblog\x.log`
+(macOS: any terminal on `/dev/cu.usbmodem*`). Use this instead of LASTLOG
+photos. High speed with the W1C fix (K18) is untested.
 
 **State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~2–3 min on **all
 eight CPUs** (six A55 + two A78, E35) with **real touch, all three side keys**
@@ -61,8 +69,9 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E41** (= E39 + `sweetsample=-`; kernel K12,
-`halt_restart_timeout=60`);
+**Phone:** `boot_a` holds **E47** (kernel K18 = 0200–0210, CI run
+43603524773; E41 boot line + `g54usb=1 g54usbfs=1`; probe with
+`LASTLOG_GREP="G54 USB"` and K18 ring addresses);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
 **Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
@@ -93,20 +102,21 @@ out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --out out/g1-fast -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
 -D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1 -D LASTLOG_S=8
 -D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0` (ring addresses are
-unchanged K4–K12; recompute with `llvm-nm` if a kernel changes them).
+unchanged K4–K17; **K18 moved them to `0x141c7a5f8`/`0x141c7a5f0`**;
+recompute with `llvm-nm` whenever a kernel changes). Optional second page
+of matching lines: `-D 'LASTLOG_GREP="G54 USB"' -D LASTLOG_GREP_S=30`.
 
-**Next, in order (owner decision, 14 November):** (1) **USB log channel**:
-port ruby's MUSB EP2 console log (patches 0086–0195, host tool
-`out/ruby/tools/host/ruby_usb_host.py`, WinUSB on Windows) to the G54's
-`mediatek,mt6855-usb20` / `musb-hdrc` controller, so whole logs are read
-live instead of one bit-decayed screen per forced restart (forced restarts
-can also be cold: E41). Start by scoping: G54 USB base/PHY/clocks from the
-stock DTB vs ruby's MT6877 values; (2) issue #14 with that log (E40/E41:
+**Next, in order:** (1) ~~USB log channel~~ **done (E47)**; try high speed
+(drop `g54usbfs=1`); (2) issue #14 with the USB log (E40/E41:
 the key thread most likely blocks in `dispatchEvent` after the chord's
 power-down event); #9/#13 About hangs, Storage crashes; (3) performance
 (GPU-less rendering is the real limit); (4) RTC, battery, backlight.
 
-**Process lessons:** never use PMIF SWINF 0 (AP = SWINF 2); any push to the PR
+**Process lessons:** MediaTek MUSB interrupt status registers are
+write-1-to-clear (E46/E47); CI's "G54 patches applied" step reverse-checks
+every G54 patch, so a new patch must keep 3 lines of distance from other G54
+hunks (E42 fix) and should be checked locally against a tree built like
+`build.sh` (`out/xnu`); never use PMIF SWINF 0 (AP = SWINF 2); any push to the PR
 branch cancels the running kernel build (`cancel-in-progress`), so batch
 docs pushes; gate every flash on `product=cancunf`, slot `a`; stock module
 disassembly (`out/vb/rd/lib/modules`, `out/dlkm`) answers register questions
