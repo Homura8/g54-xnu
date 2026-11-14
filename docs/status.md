@@ -49,15 +49,19 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## ▶ Resume here (handoff, 13 November 2026 12:45 UTC)
+## ▶ Resume here (handoff, 14 November 2026 08:00 UTC)
 
 **State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~2–3 min on **all
 eight CPUs** (six A55 + two A78, E35) with **real touch, all three side keys**
 (E26, E28) and **no press-linked power-off** (E30–E32: the key driver
-acknowledges MT6363 interrupts). Debug squares are gone (0204). The UI is
+acknowledges MT6363 interrupts), and **Settings → Shut Down really powers
+the phone off** (E39, ~15 s on battery; with USB power connected the phone
+powers off and starts again, like Android's power-off charging), and a
+**restart from iOS boots back into iOS** (E39). Debug
+squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E37b** (kernel K10, `halt_restart_timeout=0`);
+**Phone:** `boot_a` holds **E39** (kernel K12, `halt_restart_timeout=60`);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
 **Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
@@ -65,36 +69,47 @@ touch (`g54nvt=1`), 0203 keys + PMIC interrupt ack (`g54keys=1`), 0204 no
 debug markers, 0205 layer blending (no visible effect; iOS presents one
 layer), 0206 `g54noexec=a,b` (refuse crash-looping daemons), 0207 PSCI
 CPU_OFF/SYSTEM_OFF/SYSTEM_RESET, 0208 skip the HFS+ root unmount at halt,
-**0209 sync + power off when the halt timer expires — built by CI (K11) but
-not yet tested on the phone.**
+0209 sync + power off when the halt timer expires.
+**[E38](experiments/2026-11-14-e38-halt-timeout.md): 0209 runs (timer fires,
+syncs), but 0207's PSCI calls never executed: `"dsb sy; smc #0"` lost its
+`smc` because `;` is a comment in Apple's arm64 assembler. Fixed in 0207
+(`"\n\t"`), kernel K12 (CI run 43571379182).
+[E39](experiments/2026-11-14-e39-shutdown.md): Shut Down powers off and
+restart boots back into iOS (PASS).** A user restart does not keep RAM, so
+the LASTLOG page shows `NO VALID RING` afterwards (the 0201 panic reset
+keeps it).
 
-**Best boot line (E37 + 0209):** `debug=0xc serial=3 cpus=8 keepsyms=1
+**Best boot line (E37 + 0209; E39):** `debug=0xc serial=3 cpus=8 keepsyms=1
 -noprogress rd=ufsroot0 ufsrw=1 rootrw=1 launchd_unsecure_cache=1
 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1
 wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
 dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
 g54noexec=bluetoothd,fairplayd.H2 halt_restart_timeout=60`.
-Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K11>
+Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K12>
 --stock out/fw/boot.img --probe out/g1-fast --ufs --d22ap
 out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
 --out out/g1-fast -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
 -D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1 -D LASTLOG_S=8
 -D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0` (ring addresses are
-unchanged K4–K11; recompute with `llvm-nm` if a kernel changes them).
+unchanged K4–K12; recompute with `llvm-nm` if a kernel changes them).
 
-**Next, in order:** (1) **E38** = K11 + the boot line above: Settings → Shut
-Down should power off ~60 s after the slide (0209) — first test; (2) issue
-#14 volume-up + power wedges SpringBoard; #9/#13 About hangs, Storage crashes
-(need logs: the LASTLOG page after a forced restart); (3) performance (GPU-less
-rendering is the real limit); (4) RTC, battery, backlight.
+**Next, in order:** (1) issue #14 volume-up + power wedges SpringBoard;
+#9/#13 About hangs, Storage crashes (need logs: the LASTLOG page after a
+forced restart; a restart from iOS loses the log); (2) performance (GPU-less
+rendering is the real limit); (3) RTC, battery, backlight.
 
 **Process lessons:** never use PMIF SWINF 0 (AP = SWINF 2); any push to the PR
 branch cancels the running kernel build (`cancel-in-progress`), so batch
 docs pushes; gate every flash on `product=cancunf`, slot `a`; stock module
 disassembly (`out/vb/rd/lib/modules`, `out/dlkm`) answers register questions
 fastest; several agents may share this checkout: work on your own branch or
-worktree and commit explicit paths only.
+worktree and commit explicit paths only. **In kernel inline asm, separate
+instructions with `"\n\t"`, never `;`** (Apple's assembler: comment), and
+check new SMCs in the CI kernel's disassembly. On Windows (E38): use
+platform-tools r35.0.2 for writes (r37 `fastboot flash` hangs at
+`Fetching super`); every `out/` input was rebuilt there and hash-verified
+without WSL.
 
 **Multiboot (offline only, 13 November 2026; nothing run on the phone):**
 one `boot_a` with a key menu for iOS, the stock Android kernel and Fastboot
@@ -143,7 +158,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 9 | **Settings → General → About hangs Settings** (E26, E35) | Tapping About never opens the pane; Settings hangs until force-quit (owner). Probably a blocking call to a missing service (MobileGestalt/baseband/storage, cf. #13); needs logs |
 | 10 | **Blur turns solid white after transitions** in App Library and app switcher; Control Center blur is fine (E26) | Composition: static blur layers cached/rendered differently from animated ones; probably the same root as #6 |
 | 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
-| 12 | **"Slide to power off" panics → Fastboot** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). [E36b](experiments/2026-11-13-e36-shutdown.md): shutdown then stalled at `unmount(0) /` (HFS+ root on SWEET UFS) → 30 s `Halt/Restart Timed Out` panic; kernel 0208 skips the root unmount at halt. E37/E37b: iOS teardown itself stalls (launchd waiting on services, `ifnet_detach_final` waiting on `utun2`); kernel 0209 syncs and powers off when the halt timer (`halt_restart_timeout=60`) expires. Device test pending |
+| 12 | ~~**"Slide to power off" panics → Fastboot**~~ **fixed in E39** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). [E36b](experiments/2026-11-13-e36-shutdown.md): shutdown then stalled at `unmount(0) /` (HFS+ root on SWEET UFS) → 30 s `Halt/Restart Timed Out` panic; kernel 0208 skips the root unmount at halt. E37/E37b: iOS teardown itself stalls (launchd waiting on services, `ifnet_detach_final` waiting on `utun2`); kernel 0209 syncs and powers off when the halt timer (`halt_restart_timeout=60`) expires. [E38](experiments/2026-11-14-e38-halt-timeout.md): the timer and sync run, but `Halt/Restart Timed Out @IOPlatformExpert.cpp:900` (0209's fallback) because 0207's `smc` was never assembled (`;` is a comment in Apple's assembler); fixed in 0207 (K12). **[E39](experiments/2026-11-14-e39-shutdown.md): fixed — Shut Down powers off in ~15 s on battery; with USB power the phone restarts after powering off (charger behaviour). Restart from iOS boots back into iOS**  |
 | 13 | **Settings → General → Storage crashes Settings** (E35) | Unknown; needs the crash log (LASTLOG page after a crash, or launchd output) |
 | 14 | **Volume up + power (power-off menu gesture) wedges SpringBoard** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile |
 

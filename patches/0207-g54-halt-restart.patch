@@ -8,6 +8,11 @@ SYSTEM_RESET after clearing the MT6855 watchdog reboot-mode nibble
 (TOPRGU 0x1c007000 + 0x24) that the g54-xnu loader sets to Fastboot, so a
 user restart boots normally. Panic paths are unchanged.
 
+Multi-instruction inline asm separates instructions with "\n\t", never ";":
+Apple's arm64 assembler treats ";" as a comment, so "dsb sy; smc #0"
+silently dropped the smc (K11, g54-xnu E38: SYSTEM_OFF returned and the
+0209 halt timer panicked).
+
 diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
 index 2545cf9..33ada71 100644
 --- a/iokit/Kernel/arm/SweetCPU.cpp
@@ -26,7 +31,7 @@ index 2545cf9..33ada71 100644
  {
 -	panic("SWEET CPU: CPU quiesce is not implemented");
 +	register uint64_t x0 __asm__("x0") = 0x84000002ULL;     /* PSCI CPU_OFF */
-+	__asm__ volatile("dsb sy; smc #0" : "+r"(x0) : :
++	__asm__ volatile("dsb sy\n\tsmc #0" : "+r"(x0) : :
 +	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
 +	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
 +	for (;;) {
@@ -39,7 +44,7 @@ index 2545cf9..33ada71 100644
  {
 -	panic("SWEET CPU: CPU halt/suspend is not implemented");
 +	for (;;) {
-+		__asm__ volatile("dsb sy; wfi");
++		__asm__ volatile("dsb sy\n\twfi");
 +	}
  }
  
@@ -68,7 +73,7 @@ index 6abab56..409e007 100644
 +sweet_psci_system(uint64_t fn)
 +{
 +	register uint64_t x0 __asm__("x0") = fn;
-+	__asm__ volatile("dsb sy; smc #0" : "+r"(x0) : :
++	__asm__ volatile("dsb sy\n\tsmc #0" : "+r"(x0) : :
 +	    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10",
 +	    "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
 +}
