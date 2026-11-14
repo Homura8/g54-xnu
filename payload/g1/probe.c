@@ -1926,14 +1926,29 @@ static void cpu_freq(void)
 #define LASTLOG_GREP_S 30
 #endif
 
+/*
+ * Offset of LASTLOG_GREP inside the line [s, e), or e if absent. Console lines
+ * from several CPUs can interleave, so the prefix is searched anywhere and the
+ * line is shown from the match on.
+ */
+static u64 ring_line_match(const volatile u8 *ring, u64 s, u64 e)
+{
+    for (u64 b = s; b < e; b++) {
+        const char *p = LASTLOG_GREP;
+        u64 i = b;
+        while (*p && i < e && ring[i % LASTLOG_SIZE] == (u8)*p) {
+            i++;
+            p++;
+        }
+        if (!*p)
+            return b;
+    }
+    return e;
+}
+
 static int ring_line_matches(const volatile u8 *ring, u64 s, u64 e)
 {
-    const char *p = LASTLOG_GREP;
-    for (u64 i = s; *p; i++, p++) {
-        if (i >= e || ring[i % LASTLOG_SIZE] != (u8)*p)
-            return 0;
-    }
-    return 1;
+    return ring_line_match(ring, s, e) < e;
 }
 
 static void last_log_grep(u64 total, const volatile u8 *ring)
@@ -1968,7 +1983,7 @@ static void last_log_grep(u64 total, const volatile u8 *ring)
         while (e < total && ring[e % LASTLOG_SIZE] != '\n')
             e++;
         if (ring_line_matches(ring, s, e)) {
-            for (u64 k = s; k < e; k++) {
+            for (u64 k = ring_line_match(ring, s, e); k < e; k++) {
                 u8 ch = ring[k % LASTLOG_SIZE];
                 if (ch != '\r')
                     putc_((ch >= 32 && ch < 127) ? (char)ch : '.', WHITE);
