@@ -1,0 +1,927 @@
+G54: USB serial console (MediaTek MUSB peripheral, boot-arg g54usb=1).
+
+The G54's USB 2.0 controller is a MediaTek MUSB core ("mediatek,
+mt6855-usb20", musb-hdrc) at 0x11210000, not ruby's MTU3, so ruby_usb.c
+cannot drive it. bsd/dev/g54_usb.c is a small polled peripheral driver: one
+kernel thread every 1 ms, PIO through the endpoint FIFOs, no IRQ, no
+DMA/QMU. It presents a CDC-ACM function (Windows usbser, macOS AppleUSBCDC
+and Linux cdc_acm bind without a driver install): EP1 bulk IN streams the
+SWEET console log through sweet_log_copy(); opening the port (DTR) replays
+the 4 MiB ring from its oldest byte, then follows it live. EP1 OUT is
+drained and ignored.
+
+Hardware facts from the stock 5-8-6 package (g54-xnu E42): clocks are
+pericfg_ao 0x11036000 set/clr gates (clk-mt6855-peri.ko: usb_phy/usb_sys
+bank 0 bits 30/31, usb_dma_bus/usb_mcu_bus bank 1 bits 0/1); the PHY is the
+T-PHY v2 at 0x11e40000 (U2 bank +0x300, init as ruby_usb.c/mtk-tphy, board
+eye values from the DT, device mode U2PHYDTM1 |= 0x202 as
+phy-mtk-tphy.ko); VUSB is regulator-always-on. Status lines "G54 USB: ..."
+every 5 s until the host configures it; every SETUP and EP0 event is
+logged (first 96). Off by default. Debug knobs: g54usbfs=1 forces full
+speed, g54usbsrc=0..7 sets the U2 PHY HS TX slew rate (ACR5 SRCTRL),
+g54usbfifo=1|2 writes the FIFOs as bytes | 16-bit words. Status lines
+carry the last 8 control requests and their outcome ("hist").
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index ce5d8ee..821ff68 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -122,6 +122,7 @@ bsd/dev/ruby_battery.c			standard
+ bsd/dev/sweet_rpmh.c			standard
+ bsd/dev/sweet_spmi.c			standard
+ bsd/dev/sweet_usb.c			standard
++bsd/dev/g54_usb.c			standard
+ bsd/dev/mem.c				standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff --git a/bsd/dev/g54_usb.c b/bsd/dev/g54_usb.c
+new file mode 100644
+index 0000000..44414a1
+--- /dev/null
++++ b/bsd/dev/g54_usb.c
+@@ -0,0 +1,872 @@
++/*
++ * G54 (MediaTek MT6855) USB console: the SWEET kernel log as a USB serial port.
++ *
++ * The G54's USB 2.0 controller is a MediaTek MUSB core (DT "mediatek,
++ * mt6855-usb20", musb-hdrc) at 0x11210000, not ruby's MTU3, so ruby_usb.c
++ * cannot drive it. This is a small polled peripheral driver: one kernel
++ * thread every 1 ms, PIO through the endpoint FIFOs, no IRQ, no DMA/QMU.
++ * It presents a CDC-ACM function, which Windows (usbser), macOS
++ * (AppleUSBCDC) and Linux (cdc_acm) bind without a driver install.
++ *
++ *   EP0          control: standard requests + CDC line coding / DTR
++ *   EP1 IN bulk  the kernel log (sweet_log_copy). Opening the port (DTR 0->1)
++ *                replays the ring from its oldest byte, then follows it live
++ *   EP1 OUT bulk drained and ignored
++ *   EP2 IN intr  CDC notification endpoint (never used)
++ *
++ * Hardware facts (stock 5-8-6 package, g54-xnu E42 run card):
++ *   - clocks: pericfg_ao 0x11036000 set/clr gates (clk-mt6855-peri.ko):
++ *     usb_phy bit 30 and usb_sys bit 31 in bank 0 (sta 0x10, clr 0x2c),
++ *     usb_dma_bus bit 0 and usb_mcu_bus bit 1 in bank 1 (sta 0x14, clr 0x34);
++ *     writing the clr register ungates.
++ *   - PHY: T-PHY v2 at 0x11e40000, U2 bank at +0x300 (same layout as ruby);
++ *     device mode as phy-mtk-tphy.ko does it: U2PHYDTM1 |= FORCE_IDDIG |
++ *     RG_IDDIG (0x202); board eye values from the DT (vrt 5, term 5,
++ *     discth 9, rx_sqth 5) as ruby_usb.c applies its own board's.
++ *   - VUSB (MT6369) is regulator-always-on.
++ *
++ * Boot-arg g54usb=1 enables; default off. Debug knobs: g54usbfs=1 (full speed
++ * only), g54usbsrc=0..7 (U2 PHY HS TX slew rate, ACR5 SRCTRL [14:12]),
++ * g54usbfifo=1|2 (FIFO writes as bytes only | 16-bit + byte; default 32-bit +
++ * byte). Every status line carries the last 8 requests ("hist"). Every
++ * SETUP and EP0 event is logged ("G54 USB: setup/ep0 ...", first 96).
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <libkern/libkern.h>
++#include <machine/machine_routines.h>
++#include <pexpert/pexpert.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
++extern uint64_t sweet_log_position(void);
++void g54_usb_probe(void);
++
++#define G54U_MAC_PA     0x11210000UL
++#define G54U_MAC_SIZE   0x1000
++#define G54U_PHY_PA     0x11e40000UL
++#define G54U_PHY_SIZE   0x1000
++#define G54U_PERI_PA    0x11036000UL
++#define G54U_PERI_SIZE  0x1000
++
++/* pericfg_ao clock gates (set/clr ops: write 1 to clr = clock on) */
++#define PERI_STA0       0x10
++#define PERI_CLR0       0x2c
++#define PERI_STA1       0x14
++#define PERI_CLR1       0x34
++#define PERI_USB0_BITS  ((1u << 30) | (1u << 31))   /* usb_phy, usb_sys */
++#define PERI_USB1_BITS  ((1u << 0) | (1u << 1))     /* usb_dma_bus, usb_mcu_bus */
++
++/* T-PHY v2 U2 bank (port base + 0x300) */
++#define U2_ACR0         0x300
++#define U2_ACR1         0x304
++#define U2_ACR4         0x320
++#define U2_ACR5         0x314
++#define U2_ACR6         0x318
++#define U2_DTM0         0x368
++#define U2_DTM1         0x36c
++#define ACR0_INTR_EN            (1u << 5)
++#define ACR4_GPIO_CTL           (1u << 9)
++#define ACR4_GPIO_MODE          (1u << 8)
++#define ACR5_HS_100U_U3_EN      (1u << 11)
++#define ACR5_SRCTRL             (0x7u << 12)
++#define ACR6_BC11_SW_EN         (1u << 23)
++#define ACR6_OTG_VBUSCMP_EN     (1u << 20)
++#define ACR6_SQTH               0xfu
++#define ACR6_DISCTH             (0xfu << 4)
++#define ACR1_VRT_SEL            (0x7u << 12)
++#define ACR1_TERM_SEL           (0x7u << 8)
++/* G54 board values, stock DTB usb-phy@11e40000: mediatek,eye-vrt/eye-term/discth/rx_sqth */
++#define G54_EYE_VRT             5u
++#define G54_EYE_TERM            5u
++#define G54_DISCTH              9u
++#define G54_SQTH                5u
++#define DTM0_FORCE_UART_EN      (1u << 26)
++#define DTM0_FORCE_DATAIN       (1u << 23)
++#define DTM0_FORCE_DM_PD        (1u << 21)
++#define DTM0_FORCE_DP_PD        (1u << 20)
++#define DTM0_FORCE_XCVRSEL      (1u << 19)
++#define DTM0_FORCE_SUSPENDM     (1u << 18)
++#define DTM0_FORCE_TERMSEL      (1u << 17)
++#define DTM0_RG_DATAIN          (0xfu << 10)
++#define DTM0_RG_DMPD            (1u << 7)
++#define DTM0_RG_DPPD            (1u << 6)
++#define DTM0_RG_XCVRSEL         (0x3u << 4)
++#define DTM0_RG_SUSPENDM        (1u << 3)
++#define DTM0_RG_TERMSEL         (1u << 2)
++#define DTM0_PART_MASK  (DTM0_FORCE_DATAIN | DTM0_FORCE_DM_PD | DTM0_FORCE_DP_PD | \
++	                 DTM0_FORCE_XCVRSEL | DTM0_FORCE_TERMSEL | DTM0_RG_DMPD | \
++	                 DTM0_RG_DPPD | DTM0_RG_TERMSEL)
++#define DTM1_RG_UART_EN         (1u << 16)
++#define DTM1_FORCE_IDDIG        (1u << 9)
++#define DTM1_RG_VBUSVALID       (1u << 5)
++#define DTM1_RG_SESSEND         (1u << 4)
++#define DTM1_RG_AVALID          (1u << 2)
++#define DTM1_RG_IDDIG           (1u << 1)
++
++/* MUSB core (Mentor register map) */
++#define M_FADDR         0x00
++#define M_POWER         0x01
++#define M_INTRTX        0x02
++#define M_INTRRX        0x04
++#define M_INTRTXE       0x06
++#define M_INTRRXE       0x08
++#define M_INTRUSB       0x0a
++#define M_INTRUSBE      0x0b
++#define M_FRAME         0x0c
++#define M_INDEX         0x0e
++#define M_TXMAXP        0x10
++#define M_CSR0          0x12    /* EP0; TXCSR for other endpoints */
++#define M_TXCSR         0x12
++#define M_RXMAXP        0x14
++#define M_RXCSR         0x16
++#define M_COUNT0        0x18    /* EP0; RXCOUNT for other endpoints */
++#define M_RXCOUNT       0x18
++#define M_FIFO(n)       (0x20 + 4 * (n))
++#define M_DEVCTL        0x60
++#define M_TXFIFOSZ      0x62
++#define M_RXFIFOSZ      0x63
++#define M_TXFIFOADD     0x64
++#define M_RXFIFOADD     0x66
++#define M_HWVERS        0x6c
++#define M_L1INTM        0xa4    /* MediaTek level-1 interrupt mask */
++
++#define POWER_HSMODE    0x10
++#define POWER_HSENAB    0x20
++#define POWER_SOFTCONN  0x40
++#define DEVCTL_SESSION  0x01
++#define INTR_SUSPEND    0x01
++#define INTR_RESUME     0x02
++#define INTR_RESET      0x04
++
++#define CSR0_RXPKTRDY           0x0001
++#define CSR0_TXPKTRDY           0x0002
++#define CSR0_SENTSTALL          0x0004
++#define CSR0_DATAEND            0x0008
++#define CSR0_SETUPEND           0x0010
++#define CSR0_SENDSTALL          0x0020
++#define CSR0_SVDRXPKTRDY        0x0040
++#define CSR0_SVDSETUPEND        0x0080
++
++#define TXCSR_TXPKTRDY          0x0001
++#define TXCSR_FIFONOTEMPTY      0x0002
++#define TXCSR_FLUSHFIFO         0x0008
++#define TXCSR_SENTSTALL         0x0020
++#define TXCSR_CLRDATATOG        0x0040
++#define TXCSR_MODE              0x2000
++#define RXCSR_RXPKTRDY          0x0001
++#define RXCSR_SENTSTALL         0x0040
++#define RXCSR_CLRDATATOG        0x0080
++
++/* Dynamic FIFO layout (8-byte units): EP0 0..63, EP1 TX 64.., EP1 RX, EP2 TX */
++#define FIFO_EP1_TX     (64 / 8)
++#define FIFO_EP1_RX     ((64 + 512) / 8)
++#define FIFO_EP2_TX     ((64 + 1024) / 8)
++#define FIFOSZ_512      6       /* log2(512 / 8) */
++#define FIFOSZ_16       1
++
++#define G54U_VID        0x1209  /* pid.codes */
++#define G54U_PID        0x0003  /* pid.codes test PID (development only) */
++
++static vm_offset_t g54u_mac, g54u_phy, g54u_peri;
++
++static inline uint8_t  mr8(uint32_t o)  { return *(volatile uint8_t *)(g54u_mac + o); }
++static inline uint16_t mr16(uint32_t o) { return *(volatile uint16_t *)(g54u_mac + o); }
++static inline uint32_t mr32(uint32_t o) { return *(volatile uint32_t *)(g54u_mac + o); }
++static inline void mw8(uint32_t o, uint8_t v)   { *(volatile uint8_t *)(g54u_mac + o) = v; }
++static inline void mw16(uint32_t o, uint16_t v) { *(volatile uint16_t *)(g54u_mac + o) = v; }
++static inline void mw32(uint32_t o, uint32_t v) { *(volatile uint32_t *)(g54u_mac + o) = v; }
++static inline uint32_t prd(vm_offset_t b, uint32_t o) { return *(volatile uint32_t *)(b + o); }
++static inline void pwr(vm_offset_t b, uint32_t o, uint32_t v) { *(volatile uint32_t *)(b + o) = v; }
++static inline void pset(vm_offset_t b, uint32_t o, uint32_t m) { pwr(b, o, prd(b, o) | m); }
++static inline void pclr(vm_offset_t b, uint32_t o, uint32_t m) { pwr(b, o, prd(b, o) & ~m); }
++
++/* ---- descriptors --------------------------------------------------------- */
++
++static const uint8_t g54u_dev_desc[18] = {
++	18, 1, 0x00, 0x02,              /* USB 2.0 */
++	0xef, 0x02, 0x01,               /* misc / common / IAD */
++	64,
++	G54U_VID & 0xff, G54U_VID >> 8, G54U_PID & 0xff, G54U_PID >> 8,
++	0x00, 0x01,                     /* bcdDevice 1.00 */
++	1, 2, 3, 1,
++};
++
++static const uint8_t g54u_qual_desc[10] = {
++	10, 6, 0x00, 0x02, 0xef, 0x02, 0x01, 64, 1, 0,
++};
++
++#define CFG_LEN 75
++static void
++g54u_cfg_desc(uint8_t *d, int hs)
++{
++	uint16_t mps = hs ? 512 : 64;
++	uint8_t ival = hs ? 9 : 32;     /* 32 ms either way */
++	const uint8_t c[CFG_LEN] = {
++		9, 2, CFG_LEN, 0, 2, 1, 0, 0xc0, 50,       /* self-powered, 100 mA */
++		8, 11, 0, 2, 2, 2, 0, 0,                    /* IAD: if 0-1, CDC ACM */
++		9, 4, 0, 0, 1, 2, 2, 0, 0,                  /* if 0: CDC comm, ACM */
++		5, 0x24, 0x00, 0x10, 0x01,                  /* header 1.10 */
++		5, 0x24, 0x01, 0x00, 1,                     /* call management */
++		4, 0x24, 0x02, 0x02,                        /* ACM: line coding */
++		5, 0x24, 0x06, 0, 1,                        /* union 0 -> 1 */
++		7, 5, 0x82, 3, 16, 0, ival,                 /* EP2 IN interrupt */
++		9, 4, 1, 0, 2, 0x0a, 0, 0, 0,               /* if 1: CDC data */
++		7, 5, 0x01, 2, (uint8_t)mps, (uint8_t)(mps >> 8), 0,   /* EP1 OUT bulk */
++		7, 5, 0x81, 2, (uint8_t)mps, (uint8_t)(mps >> 8), 0,   /* EP1 IN bulk */
++	};
++	memcpy(d, c, CFG_LEN);
++}
++
++static uint32_t
++g54u_str_desc(uint8_t idx, uint8_t *d)
++{
++	static const char *const s[] = { NULL, "g54-xnu", "G54 XNU console", "G54XNU0001" };
++	uint32_t n = 2;
++
++	if (idx == 0) {
++		d[0] = 4; d[1] = 3; d[2] = 0x09; d[3] = 0x04;
++		return 4;
++	}
++	if (idx >= sizeof(s) / sizeof(s[0])) {
++		return 0;
++	}
++	for (const char *p = s[idx]; *p && n < 64; p++) {
++		d[n++] = (uint8_t)*p;
++		d[n++] = 0;
++	}
++	d[0] = (uint8_t)n;
++	d[1] = 3;
++	return n;
++}
++
++/* ---- state ----------------------------------------------------------------- */
++
++enum { EP0_IDLE, EP0_IN, EP0_OUT };
++
++static struct {
++	int ep0_state;
++	uint8_t ep0_buf[128];
++	uint32_t ep0_len, ep0_sent;
++	int ep0_last;                   /* DATAEND already written */
++	int ep0_zlp;                    /* short reply that is a multiple of 64: end with a ZLP */
++	int pending_addr;               /* -1: none */
++	int configured, hs, dtr;
++	int last_full;                  /* last bulk packet was full: send a ZLP when idle */
++	int fs_only;                    /* g54usbfs=1 */
++	int fifo_mode;                  /* g54usbfifo: 0 32-bit, 1 bytes, 2 16-bit */
++	struct { uint8_t req, type, len, sent; char out; } hist[8];
++	uint32_t hist_n;
++	uint32_t events;                /* logged setup/ep0 events */
++	uint8_t line_coding[7];
++	uint64_t pos;                   /* log cursor */
++	uint64_t sent, resets, setups, stalls, rx_drop;
++} g54u;
++
++static uint8_t g54u_txbuf[512];
++
++#define G54U_MAX_EVENTS 96
++/* outcome of the newest request: A ack, I in sent, D in done, S stall, E setupend,
++ * O out data, a address set, t address timeout, R bus reset before it finished */
++static void
++g54u_outcome(char c)
++{
++	if (g54u.hist_n) {
++		g54u.hist[(g54u.hist_n - 1) % 8].out = c;
++	}
++}
++
++static void
++g54u_event(const char *what, uint32_t a, uint32_t b)
++{
++	if (g54u.events < G54U_MAX_EVENTS) {
++		g54u.events++;
++		printf("G54 USB: ep0 %s %04x %04x faddr %02x power %02x\n", what, a, b,
++		    mr8(M_FADDR), mr8(M_POWER));
++	}
++}
++
++/* ---- FIFO PIO -------------------------------------------------------------- */
++
++static void
++g54u_fifo_write(int ep, const uint8_t *p, uint32_t n)
++{
++	uint32_t i = 0;
++
++	if (g54u.fifo_mode == 0) {
++		for (; i + 4 <= n; i += 4) {
++			uint32_t w = (uint32_t)p[i] | ((uint32_t)p[i + 1] << 8) |
++			    ((uint32_t)p[i + 2] << 16) | ((uint32_t)p[i + 3] << 24);
++			mw32(M_FIFO(ep), w);
++		}
++	} else if (g54u.fifo_mode == 2) {
++		for (; i + 2 <= n; i += 2) {
++			mw16(M_FIFO(ep), (uint16_t)(p[i] | (p[i + 1] << 8)));
++		}
++	}
++	for (; i < n; i++) {
++		mw8(M_FIFO(ep), p[i]);
++	}
++}
++
++static void
++g54u_fifo_read(int ep, uint8_t *p, uint32_t n)
++{
++	uint32_t i = 0;
++
++	for (; i + 4 <= n; i += 4) {
++		uint32_t w = mr32(M_FIFO(ep));
++		p[i] = (uint8_t)w; p[i + 1] = (uint8_t)(w >> 8);
++		p[i + 2] = (uint8_t)(w >> 16); p[i + 3] = (uint8_t)(w >> 24);
++	}
++	for (; i < n; i++) {
++		p[i] = mr8(M_FIFO(ep));
++	}
++}
++
++/* ---- EP0 ------------------------------------------------------------------- */
++
++static void
++g54u_ep0_tx_next(void)
++{
++	uint32_t n = g54u.ep0_len - g54u.ep0_sent;
++	uint16_t csr = CSR0_TXPKTRDY;
++
++	if (n > 64) {
++		n = 64;
++	}
++	g54u_fifo_write(0, g54u.ep0_buf + g54u.ep0_sent, n);
++	g54u.ep0_sent += n;
++	/* the data stage ends with a short packet, or with a full one if no ZLP is owed */
++	if (g54u.ep0_sent >= g54u.ep0_len && (n < 64 || !g54u.ep0_zlp)) {
++		csr |= CSR0_DATAEND;
++		g54u.ep0_last = 1;
++	}
++	mw16(M_CSR0, csr);
++}
++
++static void
++g54u_ep0_send(const uint8_t *p, uint32_t len, uint16_t wlength)
++{
++	if (len > wlength) {
++		len = wlength;
++	}
++	if (len > sizeof(g54u.ep0_buf)) {
++		len = sizeof(g54u.ep0_buf);
++	}
++	memcpy(g54u.ep0_buf, p, len);
++	g54u.ep0_len = len;
++	g54u.ep0_sent = 0;
++	g54u.ep0_last = 0;
++	g54u.ep0_zlp = (len < wlength && len != 0 && len % 64 == 0);
++	g54u.ep0_state = EP0_IN;
++	if (g54u.hist_n) {
++		g54u.hist[(g54u.hist_n - 1) % 8].sent = (uint8_t)len;
++	}
++	g54u_outcome('I');
++	mw16(M_CSR0, CSR0_SVDRXPKTRDY);
++	g54u_ep0_tx_next();
++}
++
++static void
++g54u_ep0_ack(void)
++{
++	g54u_outcome('A');
++	mw16(M_CSR0, CSR0_SVDRXPKTRDY | CSR0_DATAEND);
++	g54u.ep0_state = EP0_IDLE;
++}
++
++static void
++g54u_ep0_stall(void)
++{
++	mw16(M_CSR0, CSR0_SVDRXPKTRDY | CSR0_SENDSTALL);
++	g54u.ep0_state = EP0_IDLE;
++	g54u.stalls++;
++	g54u_outcome('S');
++}
++
++static void
++g54u_configure_eps(void)
++{
++	uint16_t mps = g54u.hs ? 512 : 64;
++
++	mw8(M_INDEX, 1);
++	mw8(M_TXFIFOSZ, FIFOSZ_512);
++	mw16(M_TXFIFOADD, FIFO_EP1_TX);
++	mw8(M_RXFIFOSZ, FIFOSZ_512);
++	mw16(M_RXFIFOADD, FIFO_EP1_RX);
++	mw16(M_TXMAXP, mps);
++	mw16(M_TXCSR, TXCSR_MODE | TXCSR_CLRDATATOG);
++	mw16(M_RXMAXP, mps);
++	mw16(M_RXCSR, RXCSR_CLRDATATOG);
++
++	mw8(M_INDEX, 2);
++	mw8(M_TXFIFOSZ, FIFOSZ_16);
++	mw16(M_TXFIFOADD, FIFO_EP2_TX);
++	mw16(M_TXMAXP, 16);
++	mw16(M_TXCSR, TXCSR_MODE | TXCSR_CLRDATATOG);
++	mw8(M_INDEX, 0);
++}
++
++static void
++g54u_set_dtr(int dtr)
++{
++	if (dtr && !g54u.dtr) {
++		uint64_t now = sweet_log_position();
++		/* replay from the oldest byte still in the 4 MiB ring */
++		g54u.pos = now > (4ULL << 20) ? now - (4ULL << 20) : 0;
++		g54u.last_full = 0;
++		printf("G54 USB: port open, replaying log from %llu of %llu\n",
++		    (unsigned long long)g54u.pos, (unsigned long long)now);
++	} else if (!dtr && g54u.dtr) {
++		printf("G54 USB: port closed after %llu bytes\n", (unsigned long long)g54u.sent);
++	}
++	g54u.dtr = dtr;
++}
++
++static void
++g54u_setup(const uint8_t *s)
++{
++	uint8_t rt = s[0], req = s[1];
++	uint16_t value = (uint16_t)(s[2] | (s[3] << 8));
++	uint16_t length = (uint16_t)(s[6] | (s[7] << 8));
++	uint8_t d[CFG_LEN];
++	uint32_t n;
++
++	g54u.setups++;
++	{
++		uint32_t h = g54u.hist_n++ % 8;
++		g54u.hist[h].req = req;
++		g54u.hist[h].type = (uint8_t)(value >> 8);
++		g54u.hist[h].len = (uint8_t)(length > 0xff ? 0xff : length);
++		g54u.hist[h].sent = 0;
++		g54u.hist[h].out = '?';
++	}
++	if (g54u.events < G54U_MAX_EVENTS) {
++		g54u.events++;
++		printf("G54 USB: setup %02x %02x %04x %04x %04x (#%llu)\n", rt, req, value,
++		    (unsigned)(s[4] | (s[5] << 8)), length, (unsigned long long)g54u.setups);
++	}
++	if ((rt & 0x60) == 0x20) {                  /* class (CDC ACM) */
++		switch (req) {
++		case 0x20:                          /* SET_LINE_CODING */
++			mw16(M_CSR0, CSR0_SVDRXPKTRDY);
++			g54u.ep0_state = EP0_OUT;
++			return;
++		case 0x21:                          /* GET_LINE_CODING */
++			g54u_ep0_send(g54u.line_coding, 7, length);
++			return;
++		case 0x22:                          /* SET_CONTROL_LINE_STATE */
++			g54u_set_dtr(value & 1);
++			g54u_ep0_ack();
++			return;
++		case 0x23:                          /* SEND_BREAK */
++			g54u_ep0_ack();
++			return;
++		}
++		g54u_ep0_stall();
++		return;
++	}
++	if ((rt & 0x60) != 0) {
++		g54u_ep0_stall();
++		return;
++	}
++	switch (req) {
++	case 0x06:                                  /* GET_DESCRIPTOR */
++		switch (value >> 8) {
++		case 1:
++			g54u_ep0_send(g54u_dev_desc, sizeof(g54u_dev_desc), length);
++			return;
++		case 2:
++			g54u_cfg_desc(d, g54u.hs);
++			g54u_ep0_send(d, CFG_LEN, length);
++			return;
++		case 3:
++			n = g54u_str_desc(value & 0xff, d);
++			if (n) {
++				g54u_ep0_send(d, n, length);
++				return;
++			}
++			break;
++		case 6:
++			g54u_ep0_send(g54u_qual_desc, sizeof(g54u_qual_desc), length);
++			return;
++		}
++		g54u_ep0_stall();
++		return;
++	case 0x05:                                  /* SET_ADDRESS */
++		g54u.pending_addr = value & 0x7f;
++		g54u_ep0_ack();
++		/*
++		 * USB 2.0 9.2.6.3: the new address must be in use within 2 ms of the
++		 * status stage, but not before it: the host still sends the status IN
++		 * to address 0. CSR0 DataEnd stays set until that status stage
++		 * completes, so spin on it (bounded, ~20 ms) and switch right after.
++		 * E43: switching on the next poll tick was too late; E44: switching on
++		 * the EP0 interrupt flag was too early (the flag was still set from the
++		 * SETUP itself, csr0 stuck at 0x0008 afterwards).
++		 */
++		for (int i = 0; i < 20000 && g54u.pending_addr >= 0; i++) {
++			uint16_t c = mr16(M_CSR0);
++			if ((c & (CSR0_DATAEND | CSR0_RXPKTRDY | CSR0_SVDRXPKTRDY)) == 0) {
++				mw8(M_FADDR, (uint8_t)g54u.pending_addr);
++				g54u_event("address set", (uint32_t)g54u.pending_addr, (uint32_t)i);
++				g54u_outcome('a');
++				g54u.pending_addr = -1;
++			} else if (c & CSR0_SETUPEND) {
++				break;          /* host gave up on this request; g54u_ep0() cleans up */
++			} else {
++				delay(1);
++			}
++		}
++		(void)mr16(M_INTRTX);   /* drop the EP0 flags of this request */
++		if (g54u.pending_addr >= 0) {
++			mw8(M_FADDR, (uint8_t)g54u.pending_addr);
++			g54u_event("address set after timeout", (uint32_t)g54u.pending_addr, 0);
++			g54u_outcome('t');
++			g54u.pending_addr = -1;
++		}
++		return;
++	case 0x09:                                  /* SET_CONFIGURATION */
++		if ((value & 0xff) == 1) {
++			g54u_configure_eps();
++			if (!g54u.configured) {
++				printf("G54 USB: configured (%s speed)\n", g54u.hs ? "high" : "full");
++			}
++			g54u.configured = 1;
++		} else {
++			g54u.configured = 0;
++			g54u_set_dtr(0);
++		}
++		g54u_ep0_ack();
++		return;
++	case 0x08:                                  /* GET_CONFIGURATION */
++		d[0] = (uint8_t)g54u.configured;
++		g54u_ep0_send(d, 1, length);
++		return;
++	case 0x00:                                  /* GET_STATUS */
++		d[0] = (rt & 0x1f) == 0 ? 1 : 0;    /* device: self-powered */
++		d[1] = 0;
++		g54u_ep0_send(d, 2, length);
++		return;
++	case 0x0a:                                  /* GET_INTERFACE */
++		d[0] = 0;
++		g54u_ep0_send(d, 1, length);
++		return;
++	case 0x01:                                  /* CLEAR_FEATURE */
++	case 0x03:                                  /* SET_FEATURE */
++	case 0x0b:                                  /* SET_INTERFACE */
++		g54u_ep0_ack();
++		return;
++	}
++	g54u_ep0_stall();
++}
++
++static void
++g54u_ep0(void)
++{
++	uint16_t csr;
++
++	mw8(M_INDEX, 0);
++	if (g54u.pending_addr >= 0) {
++		/* this interrupt is the status stage of SET_ADDRESS completing */
++		mw8(M_FADDR, (uint8_t)g54u.pending_addr);
++		g54u_event("address set", (uint32_t)g54u.pending_addr, mr16(M_CSR0));
++		g54u.pending_addr = -1;
++	}
++	csr = mr16(M_CSR0);
++	if (csr & CSR0_SENTSTALL) {
++		g54u_event("sentstall", csr, (uint32_t)g54u.ep0_state);
++		mw16(M_CSR0, (uint16_t)(csr & ~CSR0_SENTSTALL));
++		g54u.ep0_state = EP0_IDLE;
++		csr = mr16(M_CSR0);
++	}
++	if (csr & CSR0_SETUPEND) {
++		g54u_event("setupend", csr, g54u.ep0_sent);
++		g54u_outcome('E');
++		mw16(M_CSR0, CSR0_SVDSETUPEND);
++		g54u.ep0_state = EP0_IDLE;
++		csr = mr16(M_CSR0);
++	}
++	switch (g54u.ep0_state) {
++	case EP0_IN:
++		if (csr & CSR0_TXPKTRDY) {
++			return;
++		}
++		if (g54u.ep0_last) {
++			g54u_event("in done", g54u.ep0_sent, csr);
++			g54u_outcome('D');
++			g54u.ep0_state = EP0_IDLE;      /* status stage done */
++			break;
++		}
++		g54u_ep0_tx_next();
++		return;
++	case EP0_OUT:
++		if (csr & CSR0_RXPKTRDY) {
++			uint32_t n = mr16(M_COUNT0) & 0x7f;
++			uint8_t buf[64];
++			if (n > sizeof(buf)) {
++				n = sizeof(buf);
++			}
++			g54u_fifo_read(0, buf, n);
++			if (n >= 7) {
++				memcpy(g54u.line_coding, buf, 7);
++			}
++			g54u_ep0_ack();
++			g54u_outcome('O');
++		}
++		return;
++	default:
++		break;
++	}
++	if (csr & CSR0_RXPKTRDY) {
++		uint8_t s[8];
++		uint32_t n = mr16(M_COUNT0) & 0x7f;
++		if (n != 8) {
++			g54u_ep0_stall();
++			return;
++		}
++		g54u_fifo_read(0, s, 8);
++		g54u_setup(s);
++	}
++}
++
++/* ---- bulk ------------------------------------------------------------------ */
++
++static void
++g54u_bulk(void)
++{
++	uint16_t mps = g54u.hs ? 512 : 64;
++	uint16_t csr;
++
++	/* EP1 OUT: drain and drop */
++	mw8(M_INDEX, 1);
++	csr = mr16(M_RXCSR);
++	if (csr & RXCSR_SENTSTALL) {
++		mw16(M_RXCSR, (uint16_t)(csr & ~(RXCSR_SENTSTALL | RXCSR_RXPKTRDY)));
++	} else if (csr & RXCSR_RXPKTRDY) {
++		uint32_t n = mr16(M_RXCOUNT) & 0x1fff;
++		while (n >= 4) {
++			(void)mr32(M_FIFO(1));
++			n -= 4;
++		}
++		while (n--) {
++			(void)mr8(M_FIFO(1));
++		}
++		mw16(M_RXCSR, 0);
++		g54u.rx_drop++;
++	}
++
++	if (!g54u.dtr) {
++		return;
++	}
++	/* EP1 IN: stream the log, a few packets per tick */
++	for (int i = 0; i < 16; i++) {
++		uint32_t n;
++
++		csr = mr16(M_TXCSR);
++		if (csr & TXCSR_SENTSTALL) {
++			mw16(M_TXCSR, TXCSR_MODE);
++			csr = mr16(M_TXCSR);
++		}
++		if (csr & TXCSR_TXPKTRDY) {
++			break;
++		}
++		n = sweet_log_copy(&g54u.pos, (char *)g54u_txbuf, mps);
++		if (n == 0) {
++			if (g54u.last_full) {
++				mw16(M_TXCSR, TXCSR_MODE | TXCSR_TXPKTRDY);     /* ZLP */
++				g54u.last_full = 0;
++			}
++			break;
++		}
++		g54u_fifo_write(1, g54u_txbuf, n);
++		mw16(M_TXCSR, TXCSR_MODE | TXCSR_TXPKTRDY);
++		g54u.sent += n;
++		g54u.last_full = (n == mps);
++	}
++}
++
++/* ---- thread ---------------------------------------------------------------- */
++
++static void
++g54u_status(const char *why)
++{
++	mw8(M_INDEX, 0);
++	printf("G54 USB: %s power %02x devctl %02x csr0 %04x faddr %02x frame %u "
++	    "dtm1 %08x resets %llu setups %llu stalls %llu cfg %d dtr %d sent %llu\n",
++	    why, mr8(M_POWER), mr8(M_DEVCTL), mr16(M_CSR0), mr8(M_FADDR), mr16(M_FRAME) & 0x7ff,
++	    prd(g54u_phy, U2_DTM1), (unsigned long long)g54u.resets,
++	    (unsigned long long)g54u.setups, (unsigned long long)g54u.stalls,
++	    g54u.configured, g54u.dtr, (unsigned long long)g54u.sent);
++	if (g54u.hist_n) {
++		char line[128];
++		int n = snprintf(line, sizeof(line), "G54 USB: hist");
++		uint32_t first = g54u.hist_n > 8 ? g54u.hist_n - 8 : 0;
++		for (uint32_t k = first; k < g54u.hist_n && n < (int)sizeof(line) - 16; k++) {
++			uint32_t h = k % 8;
++			n += snprintf(line + n, sizeof(line) - (size_t)n, " %02x%02x/%02x:%c%u",
++			    g54u.hist[h].req, g54u.hist[h].type, g54u.hist[h].len,
++			    g54u.hist[h].out, g54u.hist[h].sent);
++		}
++		printf("%s fifo%d\n", line, g54u.fifo_mode);
++	}
++}
++
++static void
++g54u_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint64_t us = 0, next_status = 5000000;
++	uint32_t status_n = 0;          /* 12 lines 5 s apart, then 9 a minute apart */
++
++	for (;;) {
++		uint8_t usb = mr8(M_INTRUSB);
++		uint16_t tx = mr16(M_INTRTX);
++
++		(void)mr16(M_INTRRX);
++		if (usb & INTR_RESET) {
++			if (g54u.hist_n && g54u.ep0_state != EP0_IDLE) {
++				g54u_outcome('R');
++			}
++			g54u.resets++;
++			g54u.configured = 0;
++			g54u.dtr = 0;
++			g54u.ep0_state = EP0_IDLE;
++			g54u.pending_addr = -1;
++			g54u.hs = (mr8(M_POWER) & POWER_HSMODE) != 0;
++			if (g54u.resets <= 16) {
++				printf("G54 USB: bus reset #%llu (%s speed)\n",
++				    (unsigned long long)g54u.resets, g54u.hs ? "high" : "full");
++			}
++		}
++		/* EP0: on its interrupt, and also poll CSR0 (cheap) in case the flag is missed */
++		mw8(M_INDEX, 0);
++		uint16_t csr0 = mr16(M_CSR0);
++		if ((tx & 1) || g54u.ep0_state != EP0_IDLE ||
++		    (csr0 & (CSR0_RXPKTRDY | CSR0_SETUPEND | CSR0_SENTSTALL))) {
++			g54u_ep0();
++		}
++		if (g54u.configured) {
++			g54u_bulk();
++		}
++		if (!g54u.configured && status_n < 21 && us >= next_status) {
++			status_n++;
++			next_status += status_n < 12 ? 5000000 : 60000000;
++			g54u_status("waiting");
++		}
++		/* poll faster while a control transfer is in flight */
++		int busy = g54u.ep0_state != EP0_IDLE;
++		delay(busy ? 250 : 1000);
++		us += busy ? 250 : 1000;
++	}
++}
++
++void
++g54_usb_probe(void)
++{
++	int on = 0, fs = 0, src = -1, fifo = 0;
++	uint32_t s0, s1;
++	thread_t thr;
++
++	PE_parse_boot_argn("g54usb", &on, sizeof(on));
++	PE_parse_boot_argn("g54usbfs", &fs, sizeof(fs));
++	PE_parse_boot_argn("g54usbsrc", &src, sizeof(src));
++	g54u.fs_only = (fs == 1);
++	PE_parse_boot_argn("g54usbfifo", &fifo, sizeof(fifo));
++	g54u.fifo_mode = (fifo == 1 || fifo == 2) ? fifo : 0;
++	if (on != 1) {
++		printf("G54 USB: disabled (g54usb=%d)\n", on);
++		return;
++	}
++	g54u_mac = ml_io_map(G54U_MAC_PA, G54U_MAC_SIZE);
++	g54u_phy = ml_io_map(G54U_PHY_PA, G54U_PHY_SIZE);
++	g54u_peri = ml_io_map(G54U_PERI_PA, G54U_PERI_SIZE);
++	if (!g54u_mac || !g54u_phy || !g54u_peri) {
++		printf("G54 USB: mmio map failed\n");
++		return;
++	}
++
++	/* clocks: write the gate bits to the clr registers, then check status */
++	s0 = prd(g54u_peri, PERI_STA0);
++	s1 = prd(g54u_peri, PERI_STA1);
++	pwr(g54u_peri, PERI_CLR0, PERI_USB0_BITS);
++	pwr(g54u_peri, PERI_CLR1, PERI_USB1_BITS);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	delay(100);
++	printf("G54 USB: clock gates sta0 %08x -> %08x, sta1 %08x -> %08x\n",
++	    s0, prd(g54u_peri, PERI_STA0), s1, prd(g54u_peri, PERI_STA1));
++	if ((prd(g54u_peri, PERI_STA0) & PERI_USB0_BITS) || (prd(g54u_peri, PERI_STA1) & PERI_USB1_BITS)) {
++		printf("G54 USB: clocks still gated; not touching the controller\n");
++		return;
++	}
++	printf("G54 USB: MUSB hwvers %04x power %02x devctl %02x dtm0 %08x dtm1 %08x\n",
++	    mr16(M_HWVERS), mr8(M_POWER), mr8(M_DEVCTL),
++	    prd(g54u_phy, U2_DTM0), prd(g54u_phy, U2_DTM1));
++
++	/* soft-disconnect whatever the bootloader left behind */
++	mw8(M_POWER, (uint8_t)(mr8(M_POWER) & ~POWER_SOFTCONN));
++	delay(20000);
++
++	/* U2 PHY: tphy v2 instance_init + power_on (as ruby_usb.c / mtk-tphy) */
++	pclr(g54u_phy, U2_DTM0, DTM0_FORCE_UART_EN | DTM0_FORCE_SUSPENDM);
++	pwr(g54u_phy, U2_DTM0, (prd(g54u_phy, U2_DTM0) & ~(DTM0_RG_XCVRSEL | DTM0_RG_DATAIN)) | (1u << 4));
++	pclr(g54u_phy, U2_DTM1, DTM1_RG_UART_EN);
++	pset(g54u_phy, U2_ACR0, ACR0_INTR_EN);
++	pclr(g54u_phy, U2_ACR5, ACR5_HS_100U_U3_EN);
++	pclr(g54u_phy, U2_ACR4, ACR4_GPIO_CTL | ACR4_GPIO_MODE);
++	pwr(g54u_phy, U2_ACR6, (prd(g54u_phy, U2_ACR6) & ~(ACR6_BC11_SW_EN | ACR6_SQTH)) | 2u);
++	/* u2_phy_props_set: board eye values (before power_on, vendor order) */
++	pwr(g54u_phy, U2_ACR1, (prd(g54u_phy, U2_ACR1) & ~(ACR1_VRT_SEL | ACR1_TERM_SEL)) |
++	    (G54_EYE_VRT << 12) | (G54_EYE_TERM << 8));
++	pwr(g54u_phy, U2_ACR6, (prd(g54u_phy, U2_ACR6) & ~(ACR6_DISCTH | ACR6_SQTH)) |
++	    (G54_DISCTH << 4) | G54_SQTH);
++	pset(g54u_phy, U2_DTM0, DTM0_FORCE_SUSPENDM);
++	pclr(g54u_phy, U2_DTM0, DTM0_RG_SUSPENDM);
++	pset(g54u_phy, U2_DTM0, DTM0_RG_SUSPENDM);
++	delay(30);
++	pclr(g54u_phy, U2_DTM0, DTM0_FORCE_SUSPENDM);
++	pclr(g54u_phy, U2_DTM0, DTM0_RG_XCVRSEL | DTM0_RG_DATAIN | DTM0_PART_MASK);
++	pset(g54u_phy, U2_ACR6, ACR6_OTG_VBUSCMP_EN);
++	pwr(g54u_phy, U2_DTM1, (prd(g54u_phy, U2_DTM1) & ~DTM1_RG_SESSEND) |
++	    DTM1_RG_VBUSVALID | DTM1_RG_AVALID);
++	/* device mode, as phy-mtk-tphy u2_phy_instance_set_mode(PHY_MODE_USB_DEVICE) */
++	pset(g54u_phy, U2_DTM1, DTM1_FORCE_IDDIG | DTM1_RG_IDDIG);
++	if (src >= 0 && src <= 7) {
++		pwr(g54u_phy, U2_ACR5, (prd(g54u_phy, U2_ACR5) & ~ACR5_SRCTRL) | ((uint32_t)src << 12));
++	}
++	printf("G54 USB: phy acr1 %08x acr5 %08x acr6 %08x dtm0 %08x dtm1 %08x (%s%s)\n",
++	    prd(g54u_phy, U2_ACR1), prd(g54u_phy, U2_ACR5), prd(g54u_phy, U2_ACR6),
++	    prd(g54u_phy, U2_DTM0), prd(g54u_phy, U2_DTM1), g54u.fs_only ? "full speed only" : "high speed",
++	    (src >= 0 && src <= 7) ? ", srctrl set" : "");
++	delay(1000);
++
++	/* MUSB peripheral setup */
++	g54u.pending_addr = -1;
++	g54u.line_coding[0] = 0x00; g54u.line_coding[1] = 0xc2;        /* 115200 8N1 */
++	g54u.line_coding[2] = 0x01; g54u.line_coding[6] = 8;
++	(void)mr8(M_INTRUSB);
++	(void)mr16(M_INTRTX);
++	(void)mr16(M_INTRRX);
++	mw32(M_L1INTM, 0);                  /* keep the interrupt line quiet: polled */
++	mw8(M_INTRUSBE, (uint8_t)(INTR_SUSPEND | INTR_RESUME | INTR_RESET));
++	mw16(M_INTRTXE, 0x0007);
++	mw16(M_INTRRXE, 0x0002);
++	mw8(M_FADDR, 0);
++	mw8(M_INDEX, 0);
++	mw8(M_POWER, g54u.fs_only ? 0 : POWER_HSENAB);
++	mw8(M_DEVCTL, (uint8_t)(mr8(M_DEVCTL) | DEVCTL_SESSION));
++	g54u_configure_eps();
++	mw8(M_POWER, (uint8_t)((g54u.fs_only ? 0 : POWER_HSENAB) | POWER_SOFTCONN));
++	g54u_status("connected");
++
++	if (kernel_thread_start(g54u_thread, NULL, &thr) == KERN_SUCCESS) {
++		thread_deallocate(thr);
++	} else {
++		printf("G54 USB: thread start failed\n");
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 940ab07..f451905 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -904,6 +904,8 @@ bsd_init(void)
+ 	/* Single ruby USB probe call site: UFS and ramdisk roots both reach here. */
+ 	extern void ruby_usb_probe(void);
+ 	ruby_usb_probe();
++	extern void g54_usb_probe(void);
++	g54_usb_probe();	/* G54 USB console, boot-arg g54usb=1 */
+ #endif
+ 
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
