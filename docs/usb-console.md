@@ -24,7 +24,8 @@ library; no driver install on Windows 10/11, macOS or Linux.
 
 ## Requirements
 
-- Kernel with patch 0210 (K19 or later; K18 has the log but no commands).
+- Kernel with patch 0210, **K21 or later** (K18: log only; K19/K20: commands
+  work but `shot` panics, E50/E51).
 - Boot arguments: `g54usb=1` (high speed). Fallback: add `g54usbfs=1` for
   full speed. Both are in the best boot line in [status.md](status.md).
 - A USB data cable to the host. The phone shows up as **USB ID

@@ -51,13 +51,14 @@ direct kernels.
 
 ## ▶ Resume here (handoff, 14 November 2026 14:30 UTC)
 
-**New: USB serial console ([E42–E47](experiments/2026-11-14-e42-e47-usb-console.md), kernel patch 0210).**
-With `g54usb=1` the G54 appears on the host as a CDC-ACM serial
-port (`1209:0003`; Windows "USB Serial Device (COMn)", no driver install).
-Opening it replays the whole log ring, then follows it live:
-`powershell -ExecutionPolicy Bypass -File scripts\g54_console.ps1 -Out out\usblog\x.log`
-(macOS: any terminal on `/dev/cu.usbmodem*`). Use this instead of LASTLOG
-photos. High speed works (E48); `g54usbfs=1` forces full speed as a fallback.
+**New: USB console with control ([E42–E47](experiments/2026-11-14-e42-e47-usb-console.md),
+[E50–E52](experiments/2026-11-14-e50-e52-usb-control.md), kernel patch 0210, K21).**
+With `g54usb=1` the G54 is a USB serial port (`1209:0003`, no driver
+install) and `scripts/g54_usb.py` reads the log, takes screenshots (low
+270×600 in 0.4 s, half, full), taps, swipes, presses keys and reboots into
+Fastboot: a whole reflash loop takes 68 s without buttons. Guide:
+[usb-console.md](usb-console.md). High speed works (E48); `g54usbfs=1` is a
+full-speed fallback.
 
 **State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~2–3 min on **all
 eight CPUs** (six A55 + two A78, E35) with **real touch, all three side keys**
@@ -69,9 +70,9 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E49** (kernel K18 = 0200–0210, CI run
-43603524773; best boot line below, with InCallService refused; probe still
-with the previous-boot log page);
+**Phone:** `boot_a` holds **E52** (kernel K21 = 0200–0210, CI run
+43610154079, patchset `e1e10aed…`; best boot line below; probe
+`out/g1-fast-nolog` without the previous-boot page);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
 **Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
@@ -96,8 +97,8 @@ wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
 dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
 g54noexec=bluetoothd,fairplayd.H2,InCallService halt_restart_timeout=60
 sweetsample=- g54usb=1` (InCallService refused: issue #14; USB console).
-Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K18>
---stock out/fw/boot.img --probe out/g1-fast --ufs --d22ap
+Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K21>
+--stock out/fw/boot.img --probe out/g1-fast-nolog --ufs --d22ap
 out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
 --out out/g1-fast -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
@@ -105,13 +106,12 @@ out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 no previous-boot log page by default now that the USB console exists; add
 `-D LASTLOG_S=8 -D LASTLOG_RING=… -D LASTLOG_TOTAL=…` only when USB is down;
 ring addresses are
-unchanged K4–K17; **K18 moved them to `0x141c7a5f8`/`0x141c7a5f0`**;
+unchanged K4–K17; **K18–K21: `0x141c7a5f8`/`0x141c7a5f0`**;
 recompute with `llvm-nm` whenever a kernel changes). Optional second page
 of matching lines: `-D 'LASTLOG_GREP="G54 USB"' -D LASTLOG_GREP_S=30`.
 
 **Next, in order:** (1) ~~USB log channel~~ **done (E47/E48, high speed)**; (2) ~~issue #14~~ **cause found (E48/E49): InCallService**, now refused
-by default; next: USB screenshots + input injection + reboot-to-Fastboot for
-hands-free test loops (owner request); #9/#13 About hangs, Storage crashes; (3) performance
+by default; ~~USB screenshots + input + reboot-to-Fastboot~~ **done (E52)**; #9/#13 About hangs, Storage crashes; (3) performance
 (GPU-less rendering is the real limit); (4) RTC, battery, backlight.
 
 **Process lessons:** MediaTek MUSB interrupt status registers are
