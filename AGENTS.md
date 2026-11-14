@@ -105,3 +105,8 @@ reverse-checks every G54 patch against the final tree. So:
    `;` (a comment in Apple's assembler; E38).
 6. If a kernel change moves `sweet_log_ring` (`llvm-nm`), probe builds that
    show the previous-boot log need the new `LASTLOG_RING`/`LASTLOG_TOTAL`.
+7. `ml_io_map` mappings come from the 8 MB `io_submap` and are permanent
+   (`KMA_PERMANENT`; `ml_io_unmap` on them panics). For large or temporary
+   mappings use `ml_io_map_unmappable(pa, size, 0x7 /* VM_WIMG_IO */)`
+   (E50/E51).
+8. MediaTek MUSB interrupt status registers are write-1-to-clear (E46/E47).
