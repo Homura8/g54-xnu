@@ -97,11 +97,12 @@ wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
 dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
 g54noexec=bluetoothd,fairplayd.H2,InCallService halt_restart_timeout=60
 sweetsample=- g54usb=1` (InCallService refused: issue #14; USB console).
-Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K21>
+Kernel K21: `gh run download 43610154079 -R Homura8/g54-xnu -n g54-xnu-kernel -D out/k21`
+(then `--kernel out/k21/kernel.development.sweet`). Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K21>
 --stock out/fw/boot.img --probe out/g1-fast-nolog --ufs --d22ap
 out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
---out out/g1-fast -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
+--out out/g1-fast-nolog -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
 -D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1` (owner, 14 November:
 no previous-boot log page by default now that the USB console exists; add
 `-D LASTLOG_S=8 -D LASTLOG_RING=… -D LASTLOG_TOTAL=…` only when USB is down;

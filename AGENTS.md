@@ -72,7 +72,15 @@ low: read logs with `--grep`/`--tail`, use the default `low` screenshot
 
 | Tool | macOS | Windows |
 | --- | --- | --- |
-| Fastboot | `brew install --cask android-platform-tools` | Google platform-tools **r35.0.2** (`dl.google.com/android/repository/platform-tools_r35.0.2-win.zip`); r37's `fastboot flash` hangs at "Fetching super" on this phone (LK has no `fetch`) |
+| Fastboot | Google platform-tools **r35.0.2** (`dl.google.com/android/repository/platform-tools_r35.0.2-darwin.zip`), unpacked into `out/tools/`; Homebrew's cask may be r37 | Google platform-tools **r35.0.2** (`dl.google.com/android/repository/platform-tools_r35.0.2-win.zip`) |
+
+**Check `fastboot --version` before any write:** r37's `fastboot flash`
+hangs at "Fetching super" on this phone (LK has no `fetch`) on every OS;
+nothing is written, but the flash never starts. r35.0.2 flashes `boot_a` in
+about 2 s. Read-only `getvar` works with any version.
+
+| Tool | macOS | Windows |
+| --- | --- | --- |
 | LLVM (probe payload) | `brew install llvm lld` | `winget install LLVM.LLVM`, then add `C:\Program Files\LLVM\bin` to PATH |
 | GitHub CLI (kernel artifacts) | `brew install gh` | `winget install GitHub.cli` |
 | Python 3 | system / brew | python.org; standard library only for all scripts |
