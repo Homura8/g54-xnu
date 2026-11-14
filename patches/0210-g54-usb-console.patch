@@ -16,7 +16,9 @@ bank 0 bits 30/31, usb_dma_bus/usb_mcu_bus bank 1 bits 0/1); the PHY is the
 T-PHY v2 at 0x11e40000 (U2 bank +0x300, init as ruby_usb.c/mtk-tphy, board
 eye values from the DT, device mode U2PHYDTM1 |= 0x202 as
 phy-mtk-tphy.ko); VUSB is regulator-always-on. Status lines "G54 USB: ..."
-every 5 s until the host configures it. Off by default.
+every 5 s until the host configures it; every SETUP and EP0 event is
+logged (first 96). Off by default. Debug knobs: g54usbfs=1 forces full
+speed, g54usbsrc=0..7 sets the U2 PHY HS TX slew rate (ACR5 SRCTRL).
 
 diff --git a/bsd/conf/files b/bsd/conf/files
 index ce5d8ee..821ff68 100644
@@ -32,10 +34,10 @@ index ce5d8ee..821ff68 100644
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/g54_usb.c b/bsd/dev/g54_usb.c
 new file mode 100644
-index 0000000..19acb49
+index 0000000..a1cf195
 --- /dev/null
 +++ b/bsd/dev/g54_usb.c
-@@ -0,0 +1,749 @@
+@@ -0,0 +1,784 @@
 +/*
 + * G54 (MediaTek MT6855) USB console: the SWEET kernel log as a USB serial port.
 + *
@@ -63,7 +65,9 @@ index 0000000..19acb49
 + *     discth 9, rx_sqth 5) as ruby_usb.c applies its own board's.
 + *   - VUSB (MT6369) is regulator-always-on.
 + *
-+ * Boot-arg g54usb=1 enables; default off.
++ * Boot-arg g54usb=1 enables; default off. Debug knobs: g54usbfs=1 (full speed
++ * only), g54usbsrc=0..7 (U2 PHY HS TX slew rate, ACR5 SRCTRL [14:12]). Every
++ * SETUP and EP0 event is logged ("G54 USB: setup/ep0 ...", first 96).
 + */
 +#if defined(ARM64_BOARD_CONFIG_SWEET)
 +#include <sys/param.h>
@@ -107,6 +111,7 @@ index 0000000..19acb49
 +#define ACR4_GPIO_CTL           (1u << 9)
 +#define ACR4_GPIO_MODE          (1u << 8)
 +#define ACR5_HS_100U_U3_EN      (1u << 11)
++#define ACR5_SRCTRL             (0x7u << 12)
 +#define ACR6_BC11_SW_EN         (1u << 23)
 +#define ACR6_OTG_VBUSCMP_EN     (1u << 20)
 +#define ACR6_SQTH               0xfu
@@ -290,6 +295,8 @@ index 0000000..19acb49
 +	int pending_addr;               /* -1: none */
 +	int configured, hs, dtr;
 +	int last_full;                  /* last bulk packet was full: send a ZLP when idle */
++	int fs_only;                    /* g54usbfs=1 */
++	uint32_t events;                /* logged setup/ep0 events */
 +	uint8_t line_coding[7];
 +	uint64_t pos;                   /* log cursor */
 +	uint64_t sent, resets, setups, stalls, rx_drop;
@@ -297,6 +304,17 @@ index 0000000..19acb49
 +} g54u;
 +
 +static uint8_t g54u_txbuf[512];
++
++#define G54U_MAX_EVENTS 96
++static void
++g54u_event(const char *what, uint32_t a, uint32_t b)
++{
++	if (g54u.events < G54U_MAX_EVENTS) {
++		g54u.events++;
++		printf("G54 USB: ep0 %s %04x %04x faddr %02x power %02x\n", what, a, b,
++		    mr8(M_FADDR), mr8(M_POWER));
++	}
++}
 +
 +/* ---- FIFO PIO -------------------------------------------------------------- */
 +
@@ -434,6 +452,11 @@ index 0000000..19acb49
 +	uint32_t n;
 +
 +	g54u.setups++;
++	if (g54u.events < G54U_MAX_EVENTS) {
++		g54u.events++;
++		printf("G54 USB: setup %02x %02x %04x %04x %04x (#%llu)\n", rt, req, value,
++		    (unsigned)(s[4] | (s[5] << 8)), length, (unsigned long long)g54u.setups);
++	}
 +	if ((rt & 0x60) == 0x20) {                  /* class (CDC ACM) */
 +		switch (req) {
 +		case 0x20:                          /* SET_LINE_CODING */
@@ -529,15 +552,18 @@ index 0000000..19acb49
 +	if (g54u.pending_addr >= 0) {
 +		/* this interrupt is the status stage of SET_ADDRESS completing */
 +		mw8(M_FADDR, (uint8_t)g54u.pending_addr);
++		g54u_event("address set", (uint32_t)g54u.pending_addr, mr16(M_CSR0));
 +		g54u.pending_addr = -1;
 +	}
 +	csr = mr16(M_CSR0);
 +	if (csr & CSR0_SENTSTALL) {
++		g54u_event("sentstall", csr, (uint32_t)g54u.ep0_state);
 +		mw16(M_CSR0, (uint16_t)(csr & ~CSR0_SENTSTALL));
 +		g54u.ep0_state = EP0_IDLE;
 +		csr = mr16(M_CSR0);
 +	}
 +	if (csr & CSR0_SETUPEND) {
++		g54u_event("setupend", csr, g54u.ep0_sent);
 +		mw16(M_CSR0, CSR0_SVDSETUPEND);
 +		g54u.ep0_state = EP0_IDLE;
 +		csr = mr16(M_CSR0);
@@ -548,6 +574,7 @@ index 0000000..19acb49
 +			return;
 +		}
 +		if (g54u.ep0_last) {
++			g54u_event("in done", g54u.ep0_sent, csr);
 +			g54u.ep0_state = EP0_IDLE;      /* status stage done */
 +			break;
 +		}
@@ -669,7 +696,7 @@ index 0000000..19acb49
 +			g54u.ep0_state = EP0_IDLE;
 +			g54u.pending_addr = -1;
 +			g54u.hs = (mr8(M_POWER) & POWER_HSMODE) != 0;
-+			if (g54u.resets <= 8) {
++			if (g54u.resets <= 16) {
 +				printf("G54 USB: bus reset #%llu (%s speed)\n",
 +				    (unsigned long long)g54u.resets, g54u.hs ? "high" : "full");
 +			}
@@ -695,11 +722,14 @@ index 0000000..19acb49
 +void
 +g54_usb_probe(void)
 +{
-+	int on = 0;
++	int on = 0, fs = 0, src = -1;
 +	uint32_t s0, s1;
 +	thread_t thr;
 +
 +	PE_parse_boot_argn("g54usb", &on, sizeof(on));
++	PE_parse_boot_argn("g54usbfs", &fs, sizeof(fs));
++	PE_parse_boot_argn("g54usbsrc", &src, sizeof(src));
++	g54u.fs_only = (fs == 1);
 +	if (on != 1) {
 +		printf("G54 USB: disabled (g54usb=%d)\n", on);
 +		return;
@@ -757,6 +787,13 @@ index 0000000..19acb49
 +	    DTM1_RG_VBUSVALID | DTM1_RG_AVALID);
 +	/* device mode, as phy-mtk-tphy u2_phy_instance_set_mode(PHY_MODE_USB_DEVICE) */
 +	pset(g54u_phy, U2_DTM1, DTM1_FORCE_IDDIG | DTM1_RG_IDDIG);
++	if (src >= 0 && src <= 7) {
++		pwr(g54u_phy, U2_ACR5, (prd(g54u_phy, U2_ACR5) & ~ACR5_SRCTRL) | ((uint32_t)src << 12));
++	}
++	printf("G54 USB: phy acr1 %08x acr5 %08x acr6 %08x dtm0 %08x dtm1 %08x (%s%s)\n",
++	    prd(g54u_phy, U2_ACR1), prd(g54u_phy, U2_ACR5), prd(g54u_phy, U2_ACR6),
++	    prd(g54u_phy, U2_DTM0), prd(g54u_phy, U2_DTM1), g54u.fs_only ? "full speed only" : "high speed",
++	    (src >= 0 && src <= 7) ? ", srctrl set" : "");
 +	delay(1000);
 +
 +	/* MUSB peripheral setup */
@@ -772,10 +809,10 @@ index 0000000..19acb49
 +	mw16(M_INTRRXE, 0x0002);
 +	mw8(M_FADDR, 0);
 +	mw8(M_INDEX, 0);
-+	mw8(M_POWER, POWER_HSENAB);
++	mw8(M_POWER, g54u.fs_only ? 0 : POWER_HSENAB);
 +	mw8(M_DEVCTL, (uint8_t)(mr8(M_DEVCTL) | DEVCTL_SESSION));
 +	g54u_configure_eps();
-+	mw8(M_POWER, (uint8_t)(POWER_HSENAB | POWER_SOFTCONN));
++	mw8(M_POWER, (uint8_t)((g54u.fs_only ? 0 : POWER_HSENAB) | POWER_SOFTCONN));
 +	g54u_status("connected");
 +
 +	if (kernel_thread_start(g54u_thread, NULL, &thr) == KERN_SUCCESS) {
