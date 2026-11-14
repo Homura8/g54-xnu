@@ -1916,6 +1916,91 @@ static void cpu_freq(void)
 #endif
 #define LASTLOG_SIZE (4UL << 20)
 
+#ifdef LASTLOG_GREP
+/*
+ * Second page: only the previous boot's lines that start with LASTLOG_GREP
+ * (e.g. -D 'LASTLOG_GREP="G54 USB"'), searched through the whole ring, the
+ * newest ~110 screen rows of them, shown for LASTLOG_GREP_S seconds.
+ */
+#ifndef LASTLOG_GREP_S
+#define LASTLOG_GREP_S 30
+#endif
+
+/*
+ * Offset of LASTLOG_GREP inside the line [s, e), or e if absent. Console lines
+ * from several CPUs can interleave, so the prefix is searched anywhere and the
+ * line is shown from the match on.
+ */
+static u64 ring_line_match(const volatile u8 *ring, u64 s, u64 e)
+{
+    for (u64 b = s; b < e; b++) {
+        const char *p = LASTLOG_GREP;
+        u64 i = b;
+        while (*p && i < e && ring[i % LASTLOG_SIZE] == (u8)*p) {
+            i++;
+            p++;
+        }
+        if (!*p)
+            return b;
+    }
+    return e;
+}
+
+static int ring_line_matches(const volatile u8 *ring, u64 s, u64 e)
+{
+    return ring_line_match(ring, s, e) < e;
+}
+
+static void last_log_grep(u64 total, const volatile u8 *ring)
+{
+    u64 lim = total > LASTLOG_SIZE ? LASTLOG_SIZE : total;
+    u64 lo = total - lim, from = total, i = total;
+    u32 rows = 0, steps = 0;
+
+    /* Walk back line by line; [s, e) is one line without its '\n'. */
+    while (i > lo && rows < 110) {
+        u64 e = i, s = i;
+        while (s > lo && ring[(s - 1) % LASTLOG_SIZE] != '\n') {
+            s--;
+            if ((++steps & 0xffff) == 0)
+                kick();
+        }
+        if (ring_line_matches(ring, s, e)) {
+            rows += 1 + (u32)((e - s) / 86);
+            from = s;
+        }
+        i = s > lo ? s - 1 : lo;
+    }
+    fill(&h.fb, BLACK);
+    cx = cy = 0;
+    puts_("LAST BOOT LOG, LINES STARTING ", GREEN);
+    puts_(LASTLOG_GREP, GREEN);
+    puts_("\n", WHITE);
+    if (from == total)
+        puts_("NONE\n", 0xffff0000U);
+    for (u64 s = from; s < total;) {
+        u64 e = s;
+        while (e < total && ring[e % LASTLOG_SIZE] != '\n')
+            e++;
+        if (ring_line_matches(ring, s, e)) {
+            for (u64 k = ring_line_match(ring, s, e); k < e; k++) {
+                u8 ch = ring[k % LASTLOG_SIZE];
+                if (ch != '\r')
+                    putc_((ch >= 32 && ch < 127) ? (char)ch : '.', WHITE);
+            }
+            putc_('\n', WHITE);
+        }
+        s = e + 1;
+        if ((++steps & 0xff) == 0)
+            kick();
+    }
+    for (int t = 0; t < LASTLOG_GREP_S; t++) {
+        kick();
+        wait_s(1);
+    }
+}
+#endif /* LASTLOG_GREP */
+
 static void last_log(void)
 {
     u64 total = *(volatile u64 *)(u64)LASTLOG_TOTAL;
@@ -1956,6 +2041,9 @@ static void last_log(void)
             kick();
             wait_s(1);
         }
+#ifdef LASTLOG_GREP
+        last_log_grep(total, ring);
+#endif
     }
     sc = SCALE;
     cx = cy = 0;

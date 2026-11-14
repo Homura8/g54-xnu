@@ -1,9 +1,29 @@
 # g54-xnu
 
-An independent port of Apple's open-source XNU kernel, and eventually the
-iOS 16.7.16 userland, to the **Motorola Moto G54 5G** (MediaTek, reported
-MT6855 / Dimensity 7020). Research bring-up: nothing here is a usable or secure
-iOS device, and nothing here has run on a G54 yet.
+An independent port of Apple's open-source XNU kernel and the unmodified
+iOS 16.7.16 userland (iPhone X) to the **Motorola Moto G54 5G** (MediaTek
+MT6855 / Dimensity 7020). Research bring-up: nothing here is a usable or
+secure iOS device.
+
+**What works on the G54 today** (details: [docs/status.md](docs/status.md)):
+the stock LK bootloader starts our payload, XNU boots on all eight CPUs,
+mounts an iOS 16.7.16 root from UFS and reaches **SpringBoard** with real
+touch and side keys; Settings → Shut Down and restart work; a **USB
+console** gives the kernel log, screenshots and touch/key input over one
+cable. Still missing: GPU (software rendering, ~8 fps), audio, RTC, battery,
+backlight, telephony.
+
+## Start here
+
+| You are | Read |
+| --- | --- |
+| Resuming work on the G54 (owner or agent) | [AGENTS.md](AGENTS.md) → [docs/status.md](docs/status.md) → [docs/hardware-loop.md](docs/hardware-loop.md) |
+| Driving the phone from a computer | [docs/usb-console.md](docs/usb-console.md) (`scripts/g54_usb.py`: log, `shot`, `tap`, `swipe`, `key`, `fastboot`) |
+| Writing a kernel patch | [docs/build.md](docs/build.md) (`scripts/xnu_tree.sh`: local tree, CI's gate, patchset hash) |
+| Porting to a similar MediaTek phone | the run cards in [docs/experiments/](docs/experiments/), [docs/device-facts.md](docs/device-facts.md), the porting checklist in [docs/usb-console.md](docs/usb-console.md), and `scripts/fw_tools.py` |
+
+Host: macOS or Windows (no WSL needed) with Python 3, LLVM, platform-tools
+and the GitHub CLI; setup table in [AGENTS.md](AGENTS.md).
 
 ## Approach
 
@@ -12,47 +32,38 @@ from scratch:
 
 | Upstream | What we reuse |
 | --- | --- |
-| [lky005/ruby-ios-bringup](https://github.com/lky005/ruby-ios-bringup) | XNU 8796 + iPhone X iOS 16.7.16 on a MediaTek MT6877 phone, booted directly by the stock LK bootloader: UFS root, LK framebuffer display, touch, keys, SpringBoard. Kernel patch recipe, CI hash gates, boot-image tools |
-| [lgrachov/ios-qemu](https://github.com/lgrachov/ios-qemu) / sweet lineage | The underlying XNU patch series (sweet 0001–0079), device-tree and payload tools, the iOS root-disk builder |
+| [lky005/ruby-ios-bringup](https://github.com/lky005/ruby-ios-bringup) | XNU 8796 + iPhone X iOS 16.7.16 on a MediaTek MT6877 phone, booted directly by the stock LK bootloader: UFS root, LK framebuffer display, touch, keys, SpringBoard. Kernel patch recipe, CI hash gates |
+| [lgrachov/ios-qemu](https://github.com/lgrachov/ios-qemu) / sweet lineage, fetched via [MakrSas/ios-topaz](https://github.com/MakrSas/ios-topaz) at `BASE_SHA` | The underlying XNU patch series (sweet 0001–0079), device-tree and payload tools, the iOS root-disk builder |
 | [blacktop/darwin-xnu-build](https://github.com/blacktop/darwin-xnu-build) | The XNU build driver |
-| [UniXNU](https://github.com/UniXNU/UniXNU) | Fallback route (UEFI + iPadOS 17) if direct LK boot proves impossible on the G54 |
+| [UniXNU](https://github.com/UniXNU/UniXNU) | Fallback route (UEFI + iPadOS 17) if direct LK boot had failed |
 | [Celestia Nexus](https://github.com/Homura8/celestia-nexus) | Hardware-agnostic experiment records, pinned inputs and evidence conventions |
 
 Nothing from these projects is vendored: sources are fetched at pinned commits
-during builds. No Apple firmware, IPSW, KDK, root image or device dump is ever
-committed.
+during builds. No Apple firmware, IPSW, KDK, root image, stock firmware or
+device dump is ever committed (`scripts/check_repo.py` enforces common
+cases); everything derived lives in Git-ignored `out/`.
 
-## Status
+## Repository map
 
-See [docs/status.md](docs/status.md). In short: line **K0**, which builds
-ruby's kernel unchanged in CI to prove the pipeline, is in place. Device facts (M1) have been collected from the actual G54; firmware/recovery
-analysis and the first observable execution (M3) remain pending.
-
-## Connected-device bring-up (G54 owner / local coding agent)
-
-**Current focus:** the real device has an unlocked bootloader and captured
-ADB/Fastboot M1 facts. The fastest route to **iOS 16.7.16 SpringBoard** is the
-iterative [hardware experiment loop](docs/hardware-loop.md), not another
-framework milestone. Read its firmware/OTA and recovery prerequisites
-**before issuing any boot or write operation**.
-
-The Mac may have direct ADB/Fastboot access to the phone. Agents should
-check for it, use host-side verification, and iteratively test only within
-the owner's current approved risk scope. Bootloader acceptance, XNU entry,
-PID 1 and SpringBoard are separate evidence gates; none has yet been
-observed on this G54.
-
-The baseline [K0 build](docs/build.md) is already reproducible; see
-[observed M1 facts](docs/device-facts.md) and the
-[run card template](docs/experiments/TEMPLATE.md). This project keeps
-G54-specific boot work separate from Celestia Nexus.
+| Path | What |
+| --- | --- |
+| `patches/02NN-g54-*.patch` | G54 kernel patches (APSL 2.0), applied after ruby's series |
+| `config/kernel.env` | Every pin and hash the kernel build checks |
+| `payload/g1/` | The probe: runs first from LK, fixes UFS/touch hardware state, loads XNU |
+| `scripts/g54_payload.py`, `g54_xnu_image.py` | Build the probe and the bootable `boot_a` image |
+| `scripts/g54_usb.py`, `g54_console.ps1` | USB console host tools |
+| `scripts/fw_tools.py`, `build_lzfse.sh` | Read-only firmware extraction (super/EROFS/ramdisk/DTB/.ko tables/IM4P) |
+| `scripts/xnu_tree.sh` | Local patched XNU tree and CI's patch checks |
+| `scripts/mkiosroot-macos.sh` | Builds the iOS root image (macOS) |
+| `docs/experiments/` | One run card per hardware experiment (E0–E50…) |
 
 ## Build the kernel
 
 `.github/workflows/kernel.yml` runs on GitHub's `macos-15` runner with
-Xcode 16.0. It verifies every pin in [`config/kernel.env`](config/kernel.env):
-ruby's patchset hash, the G54 patchset hash and the built kernel's
-executable-data hash. Details are in [docs/build.md](docs/build.md).
+Xcode 16.0 (~5 min). It verifies every pin in
+[`config/kernel.env`](config/kernel.env): ruby's patchset hash, the G54
+patchset hash and, when recorded, the built kernel's executable-data hash.
+Details are in [docs/build.md](docs/build.md).
 
 ```sh
 python3 scripts/check_repo.py                          # no device, no network
@@ -62,10 +73,13 @@ gh workflow run kernel.yml -R Homura8/g54-xnu          # or push to patches/ or 
 
 ## Safety
 
-No command in this repository unlocks, flashes or writes to a phone. Physical
-device steps are documented separately, need the owner's explicit approval,
-prefer RAM-only `fastboot boot`, and start with a verified backup and recovery
-path ([docs/device-facts.md](docs/device-facts.md)).
+Phone writes are documented steps, never automatic: they need the owner's
+approval (a standing approval covers reflashing `boot_a`, see AGENTS.md), a
+verified stock restore image and a recovery route
+([docs/hardware-loop.md](docs/hardware-loop.md)). `fastboot boot` does not
+work on the G54, so tests flash `boot_a`. The scripts here never flash; the
+USB console's `fastboot`/`reboot` commands only reboot the phone (after a
+filesystem sync). Never flash a package's `flashfile.xml` wholesale.
 
 ## Licence
 
