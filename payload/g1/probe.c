@@ -1916,6 +1916,76 @@ static void cpu_freq(void)
 #endif
 #define LASTLOG_SIZE (4UL << 20)
 
+#ifdef LASTLOG_GREP
+/*
+ * Second page: only the previous boot's lines that start with LASTLOG_GREP
+ * (e.g. -D 'LASTLOG_GREP="G54 USB"'), searched through the whole ring, the
+ * newest ~110 screen rows of them, shown for LASTLOG_GREP_S seconds.
+ */
+#ifndef LASTLOG_GREP_S
+#define LASTLOG_GREP_S 30
+#endif
+
+static int ring_line_matches(const volatile u8 *ring, u64 s, u64 e)
+{
+    const char *p = LASTLOG_GREP;
+    for (u64 i = s; *p; i++, p++) {
+        if (i >= e || ring[i % LASTLOG_SIZE] != (u8)*p)
+            return 0;
+    }
+    return 1;
+}
+
+static void last_log_grep(u64 total, const volatile u8 *ring)
+{
+    u64 lim = total > LASTLOG_SIZE ? LASTLOG_SIZE : total;
+    u64 lo = total - lim, from = total, i = total;
+    u32 rows = 0, steps = 0;
+
+    /* Walk back line by line; [s, e) is one line without its '\n'. */
+    while (i > lo && rows < 110) {
+        u64 e = i, s = i;
+        while (s > lo && ring[(s - 1) % LASTLOG_SIZE] != '\n') {
+            s--;
+            if ((++steps & 0xffff) == 0)
+                kick();
+        }
+        if (ring_line_matches(ring, s, e)) {
+            rows += 1 + (u32)((e - s) / 86);
+            from = s;
+        }
+        i = s > lo ? s - 1 : lo;
+    }
+    fill(&h.fb, BLACK);
+    cx = cy = 0;
+    puts_("LAST BOOT LOG, LINES STARTING ", GREEN);
+    puts_(LASTLOG_GREP, GREEN);
+    puts_("\n", WHITE);
+    if (from == total)
+        puts_("NONE\n", 0xffff0000U);
+    for (u64 s = from; s < total;) {
+        u64 e = s;
+        while (e < total && ring[e % LASTLOG_SIZE] != '\n')
+            e++;
+        if (ring_line_matches(ring, s, e)) {
+            for (u64 k = s; k < e; k++) {
+                u8 ch = ring[k % LASTLOG_SIZE];
+                if (ch != '\r')
+                    putc_((ch >= 32 && ch < 127) ? (char)ch : '.', WHITE);
+            }
+            putc_('\n', WHITE);
+        }
+        s = e + 1;
+        if ((++steps & 0xff) == 0)
+            kick();
+    }
+    for (int t = 0; t < LASTLOG_GREP_S; t++) {
+        kick();
+        wait_s(1);
+    }
+}
+#endif /* LASTLOG_GREP */
+
 static void last_log(void)
 {
     u64 total = *(volatile u64 *)(u64)LASTLOG_TOTAL;
@@ -1956,6 +2026,9 @@ static void last_log(void)
             kick();
             wait_s(1);
         }
+#ifdef LASTLOG_GREP
+        last_log_grep(total, ring);
+#endif
     }
     sc = SCALE;
     cx = cy = 0;
