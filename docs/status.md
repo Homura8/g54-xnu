@@ -52,12 +52,12 @@ direct kernels.
 ## ▶ Resume here (handoff, 14 November 2026 14:30 UTC)
 
 **New: USB serial console ([E42–E47](experiments/2026-11-14-e42-e47-usb-console.md), kernel patch 0210).**
-With `g54usb=1 g54usbfs=1` the G54 appears on the host as a CDC-ACM serial
+With `g54usb=1` the G54 appears on the host as a CDC-ACM serial
 port (`1209:0003`; Windows "USB Serial Device (COMn)", no driver install).
 Opening it replays the whole log ring, then follows it live:
 `powershell -ExecutionPolicy Bypass -File scripts\g54_console.ps1 -Out out\usblog\x.log`
 (macOS: any terminal on `/dev/cu.usbmodem*`). Use this instead of LASTLOG
-photos. High speed with the W1C fix (K18) is untested.
+photos. High speed works (E48); `g54usbfs=1` forces full speed as a fallback.
 
 **State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~2–3 min on **all
 eight CPUs** (six A55 + two A78, E35) with **real touch, all three side keys**
@@ -69,8 +69,8 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E47** (kernel K18 = 0200–0210, CI run
-43603524773; E41 boot line + `g54usb=1 g54usbfs=1`; probe with
+**Phone:** `boot_a` holds **E48** (kernel K18 = 0200–0210, CI run
+43603524773; E41 boot line + `g54usb=1`, high speed; probe with
 `LASTLOG_GREP="G54 USB"` and K18 ring addresses);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
@@ -106,8 +106,7 @@ unchanged K4–K17; **K18 moved them to `0x141c7a5f8`/`0x141c7a5f0`**;
 recompute with `llvm-nm` whenever a kernel changes). Optional second page
 of matching lines: `-D 'LASTLOG_GREP="G54 USB"' -D LASTLOG_GREP_S=30`.
 
-**Next, in order:** (1) ~~USB log channel~~ **done (E47)**; try high speed
-(drop `g54usbfs=1`); (2) issue #14 with the USB log (E40/E41:
+**Next, in order:** (1) ~~USB log channel~~ **done (E47/E48, high speed)**; (2) issue #14 with the USB log (E40/E41:
 the key thread most likely blocks in `dispatchEvent` after the chord's
 power-down event); #9/#13 About hangs, Storage crashes; (3) performance
 (GPU-less rendering is the real limit); (4) RTC, battery, backlight.
