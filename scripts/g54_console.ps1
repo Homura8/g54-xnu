@@ -54,7 +54,12 @@ Write-Host "G54 console on $Port (Ctrl+C to stop)$(if ($Out) { ", saving to $Out
 try {
     while ($true) {
         if ($Seconds -gt 0 -and ((Get-Date) - $start).TotalSeconds -ge $Seconds) { break }
-        $chunk = $sp.ReadExisting()
+        try {
+            $chunk = $sp.ReadExisting()
+        } catch [System.InvalidOperationException], [System.IO.IOException] {
+            Write-Host "`n[port $Port went away: phone rebooted or unplugged]"
+            break
+        }
         if ($chunk.Length -gt 0) {
             $total += $chunk.Length
             if ($writer) { $writer.Write($chunk); $writer.Flush() }
@@ -64,8 +69,7 @@ try {
         }
     }
 } finally {
-    $sp.DtrEnable = $false
-    $sp.Close()
+    try { if ($sp.IsOpen) { $sp.DtrEnable = $false; $sp.Close() } } catch { }
     if ($writer) { $writer.Close() }
     Write-Host "`n[$total bytes from $Port]"
 }

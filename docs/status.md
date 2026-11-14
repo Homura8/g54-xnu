@@ -69,9 +69,9 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E48** (kernel K18 = 0200–0210, CI run
-43603524773; E41 boot line + `g54usb=1`, high speed; probe with
-`LASTLOG_GREP="G54 USB"` and K18 ring addresses);
+**Phone:** `boot_a` holds **E49** (kernel K18 = 0200–0210, CI run
+43603524773; best boot line below, with InCallService refused; probe still
+with the previous-boot log page);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
 **Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
@@ -89,26 +89,29 @@ restart boots back into iOS (PASS).** A user restart does not keep RAM, so
 the LASTLOG page shows `NO VALID RING` afterwards (the 0201 panic reset
 keeps it).
 
-**Best boot line (E37 + 0209; E39):** `debug=0xc serial=3 cpus=8 keepsyms=1
+**Best boot line (E49):** `debug=0xc serial=3 cpus=8 keepsyms=1
 -noprogress rd=ufsroot0 ufsrw=1 rootrw=1 launchd_unsecure_cache=1
 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1
 wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
 dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
-g54noexec=bluetoothd,fairplayd.H2 halt_restart_timeout=60`.
-Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K12>
+g54noexec=bluetoothd,fairplayd.H2,InCallService halt_restart_timeout=60
+sweetsample=- g54usb=1` (InCallService refused: issue #14; USB console).
+Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K18>
 --stock out/fw/boot.img --probe out/g1-fast --ufs --d22ap
 out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
 --out out/g1-fast -D UFS_FIX -D UFS_HS -D TOUCH_SPI -D TOUCH_FW
--D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1 -D LASTLOG_S=8
--D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0` (ring addresses are
+-D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1` (owner, 14 November:
+no previous-boot log page by default now that the USB console exists; add
+`-D LASTLOG_S=8 -D LASTLOG_RING=… -D LASTLOG_TOTAL=…` only when USB is down;
+ring addresses are
 unchanged K4–K17; **K18 moved them to `0x141c7a5f8`/`0x141c7a5f0`**;
 recompute with `llvm-nm` whenever a kernel changes). Optional second page
 of matching lines: `-D 'LASTLOG_GREP="G54 USB"' -D LASTLOG_GREP_S=30`.
 
-**Next, in order:** (1) ~~USB log channel~~ **done (E47/E48, high speed)**; (2) issue #14 with the USB log (E40/E41:
-the key thread most likely blocks in `dispatchEvent` after the chord's
-power-down event); #9/#13 About hangs, Storage crashes; (3) performance
+**Next, in order:** (1) ~~USB log channel~~ **done (E47/E48, high speed)**; (2) ~~issue #14~~ **cause found (E48/E49): InCallService**, now refused
+by default; next: USB screenshots + input injection + reboot-to-Fastboot for
+hands-free test loops (owner request); #9/#13 About hangs, Storage crashes; (3) performance
 (GPU-less rendering is the real limit); (4) RTC, battery, backlight.
 
 **Process lessons:** MediaTek MUSB interrupt status registers are
@@ -176,7 +179,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
 | 12 | ~~**"Slide to power off" panics → Fastboot**~~ **fixed in E39** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). [E36b](experiments/2026-11-13-e36-shutdown.md): shutdown then stalled at `unmount(0) /` (HFS+ root on SWEET UFS) → 30 s `Halt/Restart Timed Out` panic; kernel 0208 skips the root unmount at halt. E37/E37b: iOS teardown itself stalls (launchd waiting on services, `ifnet_detach_final` waiting on `utun2`); kernel 0209 syncs and powers off when the halt timer (`halt_restart_timeout=60`) expires. [E38](experiments/2026-11-14-e38-halt-timeout.md): the timer and sync run, but `Halt/Restart Timed Out @IOPlatformExpert.cpp:900` (0209's fallback) because 0207's `smc` was never assembled (`;` is a comment in Apple's assembler); fixed in 0207 (K12). **[E39](experiments/2026-11-14-e39-shutdown.md): fixed — Shut Down powers off in ~15 s on battery; with USB power the phone restarts after powering off (charger behaviour). Restart from iOS boots back into iOS**  |
 | 13 | **Settings → General → Storage crashes Settings** (E35) | Unknown; needs the crash log (LASTLOG page after a crash, or launchd output) |
-| 14 | **Volume up + power (power-off menu gesture) wedges SpringBoard** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile. [E40/E41](experiments/2026-11-14-e40-e41-chord-wedge.md): after `key 0xe9 down` + `key 0x30 down` no key event is logged again (no releases, no later presses), so the 0203 key thread most likely blocks in `dispatchEvent` → user-client gate; the SpringBoard sampler is ruled out (E41 `sweetsample=-` still wedges) |
+| 14 | ~~**Volume up + power (power-off menu gesture) wedges SpringBoard**~~ **cause found, worked around (E49)** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile. [E40/E41](experiments/2026-11-14-e40-e41-chord-wedge.md): after `key 0xe9 down` + `key 0x30 down` no key event is logged again (no releases, no later presses), so the 0203 key thread most likely blocks in `dispatchEvent` → user-client gate; the SpringBoard sampler is ruled out (E41 `sweetsample=-` still wedges) [E48/E49](experiments/2026-11-14-e48-e49-chord-incallservice.md): keys are fine (all releases delivered); during the chord SpringBoard launches **InCallService** (hosts the power-off/SOS screen in iOS 16), which never finishes without telephony (no CommCenter). With `g54noexec=…,InCallService` no wedge; the power-off screen does not appear |
 
 ## Previous: fast boot to the iOS lock screen
 
