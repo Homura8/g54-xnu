@@ -20,7 +20,9 @@ every 5 s until the host configures it; every SETUP and EP0 event is
 logged (first 96). Off by default. Debug knobs: g54usbfs=1 forces full
 speed, g54usbsrc=0..7 sets the U2 PHY HS TX slew rate (ACR5 SRCTRL),
 g54usbfifo=1|2 writes the FIFOs as bytes | 16-bit words. Status lines
-carry the last 8 control requests and their outcome ("hist").
+carry the last 8 control requests and their outcome ("hist"). MediaTek's
+MUSB interrupt status registers are write-1-to-clear (mt_usb_interrupt in
+musb_hdrc.ko writes them back), so every status read is written back.
 
 diff --git a/bsd/conf/files b/bsd/conf/files
 index ce5d8ee..821ff68 100644
@@ -36,10 +38,10 @@ index ce5d8ee..821ff68 100644
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/g54_usb.c b/bsd/dev/g54_usb.c
 new file mode 100644
-index 0000000..44414a1
+index 0000000..702cb63
 --- /dev/null
 +++ b/bsd/dev/g54_usb.c
-@@ -0,0 +1,872 @@
+@@ -0,0 +1,880 @@
 +/*
 + * G54 (MediaTek MT6855) USB console: the SWEET kernel log as a USB serial port.
 + *
@@ -222,6 +224,14 @@ index 0000000..44414a1
 +static inline void mw8(uint32_t o, uint8_t v)   { *(volatile uint8_t *)(g54u_mac + o) = v; }
 +static inline void mw16(uint32_t o, uint16_t v) { *(volatile uint16_t *)(g54u_mac + o) = v; }
 +static inline void mw32(uint32_t o, uint32_t v) { *(volatile uint32_t *)(g54u_mac + o) = v; }
++/*
++ * MediaTek's MUSB interrupt status registers are write-1-to-clear, not
++ * clear-on-read as in the Mentor core: mt_usb_interrupt (musb_hdrc.ko)
++ * writes INTRUSB/INTRTX/INTRRX back after reading them. E46: a latched
++ * RESET bit made every poll look like a bus reset.
++ */
++static inline uint8_t  m_ack8(uint32_t o)  { uint8_t v = mr8(o); if (v) { mw8(o, v); } return v; }
++static inline uint16_t m_ack16(uint32_t o) { uint16_t v = mr16(o); if (v) { mw16(o, v); } return v; }
 +static inline uint32_t prd(vm_offset_t b, uint32_t o) { return *(volatile uint32_t *)(b + o); }
 +static inline void pwr(vm_offset_t b, uint32_t o, uint32_t v) { *(volatile uint32_t *)(b + o) = v; }
 +static inline void pset(vm_offset_t b, uint32_t o, uint32_t m) { pwr(b, o, prd(b, o) | m); }
@@ -565,7 +575,7 @@ index 0000000..44414a1
 +				delay(1);
 +			}
 +		}
-+		(void)mr16(M_INTRTX);   /* drop the EP0 flags of this request */
++		(void)m_ack16(M_INTRTX);        /* drop the EP0 flags of this request */
 +		if (g54u.pending_addr >= 0) {
 +			mw8(M_FADDR, (uint8_t)g54u.pending_addr);
 +			g54u_event("address set after timeout", (uint32_t)g54u.pending_addr, 0);
@@ -766,10 +776,10 @@ index 0000000..44414a1
 +	uint32_t status_n = 0;          /* 12 lines 5 s apart, then 9 a minute apart */
 +
 +	for (;;) {
-+		uint8_t usb = mr8(M_INTRUSB);
-+		uint16_t tx = mr16(M_INTRTX);
++		uint8_t usb = m_ack8(M_INTRUSB);
++		uint16_t tx = m_ack16(M_INTRTX);
 +
-+		(void)mr16(M_INTRRX);
++		(void)m_ack16(M_INTRRX);
 +		if (usb & INTR_RESET) {
 +			if (g54u.hist_n && g54u.ep0_state != EP0_IDLE) {
 +				g54u_outcome('R');
@@ -890,9 +900,9 @@ index 0000000..44414a1
 +	g54u.pending_addr = -1;
 +	g54u.line_coding[0] = 0x00; g54u.line_coding[1] = 0xc2;        /* 115200 8N1 */
 +	g54u.line_coding[2] = 0x01; g54u.line_coding[6] = 8;
-+	(void)mr8(M_INTRUSB);
-+	(void)mr16(M_INTRTX);
-+	(void)mr16(M_INTRRX);
++	(void)m_ack8(M_INTRUSB);
++	(void)m_ack16(M_INTRTX);
++	(void)m_ack16(M_INTRRX);
 +	mw32(M_L1INTM, 0);                  /* keep the interrupt line quiet: polled */
 +	mw8(M_INTRUSBE, (uint8_t)(INTR_SUSPEND | INTR_RESUME | INTR_RESET));
 +	mw16(M_INTRTXE, 0x0007);
