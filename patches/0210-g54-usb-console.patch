@@ -47,10 +47,10 @@ index ce5d8ee..821ff68 100644
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/g54_usb.c b/bsd/dev/g54_usb.c
 new file mode 100644
-index 0000000..3428f40
+index 0000000..2900914
 --- /dev/null
 +++ b/bsd/dev/g54_usb.c
-@@ -0,0 +1,1247 @@
+@@ -0,0 +1,1307 @@
 +/*
 + * G54 (MediaTek MT6855) USB console: the SWEET kernel log as a USB serial port.
 + *
@@ -103,6 +103,7 @@ index 0000000..3428f40
 +#include <pexpert/pexpert.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++extern void ml_io_unmap(vm_offset_t, vm_size_t);
 +extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
 +extern void thread_deallocate(thread_t);
 +extern uint32_t sweet_log_copy(uint64_t *pos, char *out, uint32_t max);
@@ -339,6 +340,7 @@ index 0000000..3428f40
 +} g54u;
 +
 +static uint8_t g54u_txbuf[512];
++static void g54u_shot_abort(void);
 +
 +#define G54U_MAX_EVENTS 96
 +/* outcome of the newest request: A ack, I in sent, D in done, S stall, E setupend,
@@ -494,6 +496,7 @@ index 0000000..3428f40
 +		printf("G54 USB: port open (%s), log from %llu of %llu\n", rts ? "replay" : "live",
 +		    (unsigned long long)g54u.pos, (unsigned long long)now);
 +	} else if (!dtr && g54u.dtr) {
++		g54u_shot_abort();
 +		printf("G54 USB: port closed after %llu bytes\n", (unsigned long long)g54u.sent);
 +	}
 +	g54u.dtr = dtr;
@@ -714,6 +717,13 @@ index 0000000..3428f40
 +
 +#define G54U_FINGER     9       /* injected touches use the last slot; the panel starts at 0 */
 +#define G54U_ROW_MAX    (2048 * 3)
++/*
++ * The scanout (10 MB) does not fit the 8 MB io_submap that ml_io_map draws from
++ * (E50: kmem_alloc(..., 10387456) failed with 3), so screenshots map a sliding
++ * window of rows. 64 is a multiple of every box size (1, 2, 4).
++ */
++#define G54U_WIN_ROWS   64
++#define G54U_PG         0x4000ULL      /* 16 KiB: also 4 KiB aligned */
 +
 +static struct {
 +	char line[128];
@@ -728,7 +738,11 @@ index 0000000..3428f40
 +	int shot;                       /* 0 none, 1 header, 2 rows, 3 trailer */
 +	uint32_t f, w, h, oy, rowlen, rowpos, fb_w, fb_h, fb_rb, sseq;
 +	uint64_t t_shot;
-+	vm_offset_t fb;
++	uint64_t fb_pa;
++	vm_offset_t win_base;            /* page-aligned window mapping, 0 if none */
++	vm_size_t win_size;
++	uint32_t win_y0, win_rows, win_off;
++	int win_err;
 +	char hdr[128];
 +	uint32_t hdrlen, hdrpos;
 +	uint8_t row[G54U_ROW_MAX];
@@ -880,13 +894,8 @@ index 0000000..3428f40
 +		printf("G54 USB: err no framebuffer #%u\n", g54c.seq);
 +		return;
 +	}
-+	if (g54c.fb == 0) {
-+		g54c.fb = ml_io_map((vm_offset_t)v.v_baseAddr, (vm_size_t)(v.v_rowBytes * v.v_height));
-+		if (g54c.fb == 0) {
-+			printf("G54 USB: err framebuffer map failed #%u\n", g54c.seq);
-+			return;
-+		}
-+	}
++	g54c.fb_pa = (uint64_t)v.v_baseAddr;
++	g54c.win_err = 0;
 +	g54c.fb_w = (uint32_t)v.v_width;
 +	g54c.fb_h = (uint32_t)v.v_height;
 +	g54c.fb_rb = (uint32_t)v.v_rowBytes;
@@ -904,6 +913,52 @@ index 0000000..3428f40
 +	g54c.shot = 1;
 +}
 +
++static void
++g54u_fb_unmap(void)
++{
++	if (g54c.win_base) {
++		ml_io_unmap(g54c.win_base, g54c.win_size);
++		g54c.win_base = 0;
++	}
++}
++
++/* pointer to scanout row y, remapping the window when y leaves it */
++static const volatile uint32_t *
++g54u_fb_row(uint32_t y)
++{
++	if (!g54c.win_base || y < g54c.win_y0 || y >= g54c.win_y0 + g54c.win_rows) {
++		uint32_t rows = g54c.fb_h - y < G54U_WIN_ROWS ? g54c.fb_h - y : G54U_WIN_ROWS;
++		uint64_t pa = g54c.fb_pa + (uint64_t)y * g54c.fb_rb;
++		uint64_t base = pa & ~(G54U_PG - 1);
++		vm_offset_t va;
++
++		g54u_fb_unmap();
++		g54c.win_off = (uint32_t)(pa - base);
++		g54c.win_size = (vm_size_t)((g54c.win_off + (uint64_t)rows * g54c.fb_rb + G54U_PG - 1) & ~(G54U_PG - 1));
++		va = ml_io_map((vm_offset_t)base, g54c.win_size);
++		if (va == 0) {
++			if (!g54c.win_err++) {
++				printf("G54 USB: err framebuffer window map failed at row %u\n", y);
++			}
++			return NULL;
++		}
++		g54c.win_base = va;
++		g54c.win_y0 = y;
++		g54c.win_rows = rows;
++	}
++	return (const volatile uint32_t *)(g54c.win_base + g54c.win_off + (uint64_t)(y - g54c.win_y0) * g54c.fb_rb);
++}
++
++static void
++g54u_shot_abort(void)
++{
++	if (g54c.shot) {
++		g54c.shot = 0;
++		printf("G54 USB: shot #%u aborted\n", g54c.sseq);
++	}
++	g54u_fb_unmap();
++}
++
 +/* one output row: f x f box average of the BGRA scanout, emitted as RGB */
 +static void
 +g54u_shot_row(void)
@@ -914,8 +969,11 @@ index 0000000..3428f40
 +	for (uint32_t ox = 0; ox < g54c.w; ox++) {
 +		uint32_t r = 0, g = 0, b = 0;
 +		for (uint32_t dy = 0; dy < f; dy++) {
-+			const volatile uint32_t *src = (const volatile uint32_t *)(g54c.fb +
-+			    (uint64_t)(g54c.oy * f + dy) * g54c.fb_rb) + ox * f;
++			const volatile uint32_t *row = g54u_fb_row(g54c.oy * f + dy);
++			if (row == NULL) {
++				continue;       /* black rather than a fault */
++			}
++			const volatile uint32_t *src = row + ox * f;
 +			for (uint32_t dx = 0; dx < f; dx++) {
 +				uint32_t px = src[dx];
 +				b += px & 0xff;
@@ -959,6 +1017,7 @@ index 0000000..3428f40
 +		}
 +		if (g54c.rowpos == g54c.rowlen) {
 +			if (g54c.oy == g54c.h) {
++				g54u_fb_unmap();
 +				g54c.hdrlen = (uint32_t)snprintf(g54c.hdr, sizeof(g54c.hdr), "\n@@G54SHOT end seq=%u@@\n",
 +				    g54c.sseq);
 +				g54c.hdrpos = 0;
@@ -1160,6 +1219,7 @@ index 0000000..3428f40
 +				g54u_outcome('R');
 +			}
 +			g54u.resets++;
++			g54u_shot_abort();
 +			g54u.configured = 0;
 +			g54u.dtr = 0;
 +			g54u.ep0_state = EP0_IDLE;
