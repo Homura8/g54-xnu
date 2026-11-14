@@ -47,10 +47,10 @@ index ce5d8ee..821ff68 100644
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/g54_usb.c b/bsd/dev/g54_usb.c
 new file mode 100644
-index 0000000..3acc0b9
+index 0000000..b45bc07
 --- /dev/null
 +++ b/bsd/dev/g54_usb.c
-@@ -0,0 +1,1281 @@
+@@ -0,0 +1,1347 @@
 +/*
 + * G54 (MediaTek MT6855) USB console: the SWEET kernel log as a USB serial port.
 + *
@@ -203,9 +203,11 @@ index 0000000..3acc0b9
 +#define POWER_HSENAB    0x20
 +#define POWER_SOFTCONN  0x40
 +#define DEVCTL_SESSION  0x01
++#define DEVCTL_VBUS     0x18    /* VBUS level; 0x18 = above VBUS valid */
 +#define INTR_SUSPEND    0x01
 +#define INTR_RESUME     0x02
 +#define INTR_RESET      0x04
++#define INTR_DISCON     0x20    /* peripheral mode: session ended */
 +
 +#define CSR0_RXPKTRDY           0x0001
 +#define CSR0_TXPKTRDY           0x0002
@@ -337,6 +339,8 @@ index 0000000..3acc0b9
 +	uint8_t line_coding[7];
 +	uint64_t pos;                   /* log cursor */
 +	uint64_t sent, resets, setups, stalls, rx_drop;
++	int session_lost;               /* cable gone: SESSION/SOFTCONN must be set again */
++	uint64_t losses, restarts;
 +} g54u;
 +
 +static uint8_t g54u_txbuf[512];
@@ -1151,6 +1155,46 @@ index 0000000..3acc0b9
 +	}
 +}
 +
++/* ---- session --------------------------------------------------------------- */
++
++/*
++ * Start a peripheral session: soft-disconnect, SESSION, endpoints, SOFTCONN (musb_start
++ * order). The PHY reports the real VBUS (stock tphy forces VBUSVALID only with
++ * force-vbus, absent on the G54), so an unplug can end the session (E53: replugging
++ * under iOS never enumerated) and nothing restarted it; stock Android restarts it
++ * from the charger's cable event (mt_usb_connect). Here the poll loop does it.
++ */
++static void
++g54u_session_start(void)
++{
++	uint8_t pw = g54u.fs_only ? 0 : POWER_HSENAB;
++
++	mw8(M_FADDR, 0);
++	mw8(M_INDEX, 0);
++	mw8(M_POWER, pw);
++	mw8(M_DEVCTL, (uint8_t)(mr8(M_DEVCTL) | DEVCTL_SESSION));
++	g54u_configure_eps();
++	mw8(M_POWER, (uint8_t)(pw | POWER_SOFTCONN));
++}
++
++static void
++g54u_session_lost(uint8_t usb, uint8_t devctl)
++{
++	g54u.losses++;
++	if (g54u.losses <= 16) {
++		printf("G54 USB: session lost #%llu (intrusb %02x devctl %02x cfg %d): cable unplugged?\n",
++		    (unsigned long long)g54u.losses, usb, devctl, g54u.configured);
++	}
++	g54u_shot_abort();
++	g54u.configured = 0;
++	g54u.dtr = 0;
++	g54u.ep0_state = EP0_IDLE;
++	g54u.pending_addr = -1;
++	g54u.last_full = 0;
++	mw8(M_POWER, (uint8_t)(mr8(M_POWER) & ~POWER_SOFTCONN));
++	g54u.session_lost = 1;
++}
++
 +/* ---- thread ---------------------------------------------------------------- */
 +
 +static void
@@ -1180,14 +1224,41 @@ index 0000000..3acc0b9
 +static void
 +g54u_thread(__unused void *arg, __unused wait_result_t wr)
 +{
-+	uint64_t us = 0, next_status = 5000000;
++	uint64_t us = 0, next_status = 5000000, next_restart = 0;
 +	uint32_t status_n = 0;          /* 12 lines 5 s apart, then 9 a minute apart */
++	int vbus_was = (mr8(M_DEVCTL) & DEVCTL_VBUS) == DEVCTL_VBUS;   /* edges only, from the real start */
 +
 +	for (;;) {
 +		uint8_t usb = m_ack8(M_INTRUSB);
 +		uint16_t tx = m_ack16(M_INTRTX);
 +
 +		(void)m_ack16(M_INTRRX);
++		uint8_t devctl = mr8(M_DEVCTL);
++		int vbus = (devctl & DEVCTL_VBUS) == DEVCTL_VBUS;
++
++		if (!g54u.session_lost &&
++		    ((usb & INTR_DISCON) || !(devctl & DEVCTL_SESSION) || (vbus_was && !vbus))) {
++			g54u_session_lost(usb, devctl);
++			status_n = 0;
++			next_status = us + 5000000;
++			next_restart = us + 100000;
++		}
++		if (g54u.session_lost && (us >= next_restart || (vbus && !vbus_was))) {
++			/* 100 ms while VBUS is back, else once a second (each try may start SRP) */
++			next_restart = us + (vbus ? 100000 : 1000000);
++			g54u.restarts++;
++			g54u_session_start();
++			devctl = mr8(M_DEVCTL);
++			if (devctl & DEVCTL_SESSION) {
++				g54u.session_lost = 0;
++				if (g54u.restarts <= 16 || g54u.restarts % 64 == 0) {
++					printf("G54 USB: session restarted #%llu (devctl %02x)\n",
++					    (unsigned long long)g54u.restarts, devctl);
++				}
++			}
++			vbus = (devctl & DEVCTL_VBUS) == DEVCTL_VBUS;
++		}
++		vbus_was = vbus;
 +		if (usb & INTR_RESET) {
 +			if (g54u.hist_n && g54u.ep0_state != EP0_IDLE) {
 +				g54u_outcome('R');
@@ -1314,15 +1385,10 @@ index 0000000..3acc0b9
 +	(void)m_ack16(M_INTRTX);
 +	(void)m_ack16(M_INTRRX);
 +	mw32(M_L1INTM, 0);                  /* keep the interrupt line quiet: polled */
-+	mw8(M_INTRUSBE, (uint8_t)(INTR_SUSPEND | INTR_RESUME | INTR_RESET));
++	mw8(M_INTRUSBE, (uint8_t)(INTR_SUSPEND | INTR_RESUME | INTR_RESET | INTR_DISCON));
 +	mw16(M_INTRTXE, 0x0007);
 +	mw16(M_INTRRXE, 0x0002);
-+	mw8(M_FADDR, 0);
-+	mw8(M_INDEX, 0);
-+	mw8(M_POWER, g54u.fs_only ? 0 : POWER_HSENAB);
-+	mw8(M_DEVCTL, (uint8_t)(mr8(M_DEVCTL) | DEVCTL_SESSION));
-+	g54u_configure_eps();
-+	mw8(M_POWER, (uint8_t)((g54u.fs_only ? 0 : POWER_HSENAB) | POWER_SOFTCONN));
++	g54u_session_start();
 +	g54u_status("connected");
 +
 +	if (kernel_thread_start(g54u_thread, NULL, &thr) == KERN_SUCCESS) {
