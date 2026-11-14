@@ -49,7 +49,14 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## ▶ Resume here (handoff, 14 November 2026 14:30 UTC)
+## ▶ Resume here (handoff, 15 November 2026)
+
+**New (E53, K23): the USB console works on macOS and survives replugging the
+cable while iOS runs** ([E53](experiments/2026-11-15-e53-usb-replug-macos.md)).
+The driver kept its USB address after a bus reset, so any replug under iOS
+never enumerated; 0210 now clears `FADDR` on reset. `g54_usb.py` no longer
+picks the MediaTek preloader's port on macOS.
+
 
 **New: USB console with control ([E42–E47](experiments/2026-11-14-e42-e47-usb-console.md),
 [E50–E52](experiments/2026-11-14-e50-e52-usb-control.md), kernel patch 0210, K21).**
@@ -70,8 +77,8 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E52** (kernel K21 = 0200–0210, CI run
-43610154079, patchset `e1e10aed…`; best boot line below; probe
+**Phone:** `boot_a` holds **E53c** (kernel K23 = 0200–0210, CI run
+43615780625, patchset `dae8465d…`; best boot line below; probe
 `out/g1-fast-nolog` without the previous-boot page);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
@@ -97,8 +104,8 @@ wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
 dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
 g54noexec=bluetoothd,fairplayd.H2,InCallService halt_restart_timeout=60
 sweetsample=- g54usb=1` (InCallService refused: issue #14; USB console).
-Kernel K21: `gh run download 43610154079 -R Homura8/g54-xnu -n g54-xnu-kernel -D out/k21`
-(then `--kernel out/k21/kernel.development.sweet`). Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K21>
+Kernel K23: `gh run download 43615780625 -R Homura8/g54-xnu -n g54-xnu-kernel -D out/k23`
+(then `--kernel out/k23/kernel.development.sweet`). Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K23>
 --stock out/fw/boot.img --probe out/g1-fast-nolog --ufs --d22ap
 out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
@@ -107,7 +114,7 @@ out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 no previous-boot log page by default now that the USB console exists; add
 `-D LASTLOG_S=8 -D LASTLOG_RING=… -D LASTLOG_TOTAL=…` only when USB is down;
 ring addresses are
-unchanged K4–K17; **K18–K21: `0x141c7a5f8`/`0x141c7a5f0`**;
+unchanged K4–K17; **K18–K23: `0x141c7a5f8`/`0x141c7a5f0`**;
 recompute with `llvm-nm` whenever a kernel changes). Optional second page
 of matching lines: `-D 'LASTLOG_GREP="G54 USB"' -D LASTLOG_GREP_S=30`.
 
