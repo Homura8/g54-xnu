@@ -47,10 +47,10 @@ index ce5d8ee..821ff68 100644
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/g54_usb.c b/bsd/dev/g54_usb.c
 new file mode 100644
-index 0000000..b45bc07
+index 0000000..34d74e5
 --- /dev/null
 +++ b/bsd/dev/g54_usb.c
-@@ -0,0 +1,1347 @@
+@@ -0,0 +1,1351 @@
 +/*
 + * G54 (MediaTek MT6855) USB console: the SWEET kernel log as a USB serial port.
 + *
@@ -1159,10 +1159,10 @@ index 0000000..b45bc07
 +
 +/*
 + * Start a peripheral session: soft-disconnect, SESSION, endpoints, SOFTCONN (musb_start
-+ * order). The PHY reports the real VBUS (stock tphy forces VBUSVALID only with
-+ * force-vbus, absent on the G54), so an unplug can end the session (E53: replugging
-+ * under iOS never enumerated) and nothing restarted it; stock Android restarts it
-+ * from the charger's cable event (mt_usb_connect). Here the poll loop does it.
++ * order). On the G54 LK leaves the PHY forcing VBUSVALID/AVALID/SESSEND (dtm1 3f2f), so
++ * an unplug does not end the session (E53b) and the replug fix is FADDR in the reset
++ * handler. If the session does end (unforced PHY, as stock tphy without force-vbus),
++ * the poll loop restarts it, as stock Android does from the cable event (mt_usb_connect).
 + */
 +static void
 +g54u_session_start(void)
@@ -1269,6 +1269,10 @@ index 0000000..b45bc07
 +			g54u.dtr = 0;
 +			g54u.ep0_state = EP0_IDLE;
 +			g54u.pending_addr = -1;
++			/* a reset device answers at address 0; MUSB keeps FADDR (musb_g_reset
++			 * clears it too). Without this a replug under iOS never enumerates:
++			 * the host resets again and again at 0 while we listen at 1 (E53b). */
++			mw8(M_FADDR, 0);
 +			g54u.hs = (mr8(M_POWER) & POWER_HSMODE) != 0;
 +			if (g54u.resets <= 16) {
 +				printf("G54 USB: bus reset #%llu (%s speed)\n",
