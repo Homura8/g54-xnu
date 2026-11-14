@@ -80,11 +80,26 @@ def find_port():
         except OSError:
             return None
         return None
-    for pat in ("/dev/serial/by-id/*G54*", "/dev/cu.usbmodemG54*", "/dev/cu.usbmodem*"):
-        hits = sorted(glob.glob(pat))
-        if hits:
-            return hits[0]
-    return None
+    return find_posix_port()
+
+
+def find_posix_port(root="/"):
+    """macOS names a CDC-ACM port after the USB serial (cu.usbmodemG54XNU00011);
+    Linux has by-id links and sysfs. Never fall back to any other modem: the
+    MediaTek preloader is also a usbmodem for a second at every power-on."""
+    hits = sorted(glob.glob(os.path.join(root, "dev/serial/by-id/*G54*")))
+    hits += sorted(glob.glob(os.path.join(root, "dev/cu.usbmodemG54*")))
+    for tty in sorted(glob.glob(os.path.join(root, "sys/class/tty/ttyACM*"))):
+        ids = []
+        for name in ("idVendor", "idProduct"):
+            try:
+                with open(os.path.join(tty, "device", "..", name)) as f:
+                    ids.append(f.read().strip().lower())
+            except OSError:
+                break
+        if ids == ["1209", "0003"]:
+            hits.append(os.path.join(root, "dev", os.path.basename(tty)))
+    return hits[0] if hits else None
 
 
 class Port:

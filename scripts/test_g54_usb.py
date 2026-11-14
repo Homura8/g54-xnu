@@ -36,6 +36,39 @@ class FakePort:
         return self.out.pop(0) if self.out else b""
 
 
+class FindPortTests(unittest.TestCase):
+    def make(self, files, links=()):
+        root = tempfile.mkdtemp()
+        for rel, text in files.items():
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                f.write(text)
+        for rel, target in links:
+            path = os.path.join(root, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            os.symlink(os.path.join(root, target), path)
+        return root
+
+    def test_macos_ignores_preloader_modem(self):
+        root = self.make({"dev/cu.usbmodem2100": ""})
+        self.assertIsNone(g54_usb.find_posix_port(root))
+
+    def test_macos_picks_g54_serial(self):
+        root = self.make({"dev/cu.usbmodem1101": "", "dev/cu.usbmodemG54XNU00011": ""})
+        self.assertEqual(g54_usb.find_posix_port(root), os.path.join(root, "dev/cu.usbmodemG54XNU00011"))
+
+    def test_linux_sysfs_ids(self):
+        dev = "sys/devices/usb1/1-1"
+        root = self.make({dev + "/idVendor": "0e8d\n", dev + "/idProduct": "2000\n",
+                          dev + "/1-1:1.0/x": "",
+                          "sys/devices/usb1/1-2/idVendor": "1209\n", "sys/devices/usb1/1-2/idProduct": "0003\n",
+                          "sys/devices/usb1/1-2/1-2:1.0/x": ""},
+                         links=[("sys/class/tty/ttyACM0/device", dev + "/1-1:1.0"),
+                                ("sys/class/tty/ttyACM1/device", "sys/devices/usb1/1-2/1-2:1.0")])
+        self.assertEqual(g54_usb.find_posix_port(root), os.path.join(root, "dev/ttyACM1"))
+
+
 class G54UsbTests(unittest.TestCase):
     def test_command_matches_its_own_sequence_number(self):
         stale = b"G54 USB: done tap #3\nG54 USB: done tap #43\n"   # replayed lines must not match

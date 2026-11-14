@@ -25,12 +25,14 @@ library; no driver install on Windows 10/11, macOS or Linux.
 ## Requirements
 
 - Kernel with patch 0210, **K21 or later** (K18: log only; K19/K20: commands
-  work but `shot` panics, E50/E51).
+  work but `shot` panics, E50/E51). **K23 or later to replug the cable while
+  iOS runs** (E53); with K21/K22 the cable must stay attached from Fastboot
+  through the boot.
 - Boot arguments: `g54usb=1` (high speed). Fallback: add `g54usbfs=1` for
   full speed. Both are in the best boot line in [status.md](status.md).
 - A USB data cable to the host. The phone shows up as **USB ID
   `1209:0003`**, serial `G54XNU0001`: Windows "USB Serial Device (COMn)",
-  macOS `/dev/cu.usbmodemG54XNU0001*`, Linux `/dev/ttyACM*`
+  macOS `/dev/cu.usbmodemG54XNU00011` (E53), Linux `/dev/ttyACM*`
   (`/dev/serial/by-id/*G54*`).
 - The port appears about 60–70 s after `fastboot reboot`, when the kernel
   mounts its root (the driver starts in `bsd_init`).
@@ -98,6 +100,8 @@ runs at a time (`err busy`).
 | --- | --- |
 | No device at all on the host | Booted without `g54usb=1`, a kernel without 0210, or a charge-only cable. On the probe's log page (if enabled) look for `G54 USB: disabled` |
 | Windows: "Unknown USB Device (Device Descriptor Request Failed)" | The bus works but EP0 failed (E42–E46 history). Read the `G54 USB:` lines; build the probe with `-D 'LASTLOG_GREP="G54 USB"'` (see status.md) and photograph the second page after a Power + Volume Down restart |
+| Device gone after replugging the cable under iOS (Type-C attaches, no USB device) | Kernel older than K23: the driver kept its USB address after the bus reset (E53). Reboot with the cable attached, or use K23+ |
+| macOS: `g54_usb.py` opened `/dev/cu.usbmodem<number>` | That was the MediaTek preloader's one-second port at power-on (also listed in Network settings as "MT65xx Preloader", harmless). Fixed: the script only accepts `cu.usbmodemG54*` |
 | Port present but `g54_usb.py` cannot open it | Another program (terminal, PowerShell script) holds it |
 | Commands time out, log works | Kernel older than K19 (no command channel) |
 | Fastboot `flash` hangs at "Fetching super" | platform-tools r37; use r35.0.2 (AGENTS.md) |
