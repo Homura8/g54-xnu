@@ -31,23 +31,47 @@ directory and fails if anything is written into it. **Verified in CI run
 43207707172:** no KDK on the runner, the directory stayed empty, and the
 exec-data gate passed, so the KDK contributes nothing to this kernel.
 
-## After K0
+## After K0: writing G54 patches
 
-A G54 change goes in `patches/NNNN-g54-*.patch` (APSL 2.0, XNU paths). Its
-pull request updates `G54_PATCHSET_SHA256` and clears
-`KERNEL_EXPECT_EXEC_DATA` (record only) until a booted G54 kernel provides a
-new reference. Expected first deltas, all waiting on [device facts](device-facts.md):
+A G54 change goes in `patches/02NN-g54-*.patch` (APSL 2.0, XNU paths). Its
+pull request updates `G54_PATCHSET_SHA256` (record only for
+`KERNEL_EXPECT_EXEC_DATA`). The G54 series today: 0200 framebuffer, 0201
+panic reset, 0202 Novatek touch, 0203 keys + PMIC ack, 0204/0205 framebuffer
+fixes, 0206 `g54noexec`, 0207 PSCI halt/restart, 0208/0209 shutdown, 0210
+USB console ([usb-console.md](usb-console.md)).
 
-| Delta | Why | ruby reference |
-| --- | --- | --- |
-| Early framebuffer address/stride | the first visible kernel stage writes straight to the LK framebuffer | `ci/baseline-changes.patch` (0010/0012) |
-| Memory map / ADT inputs | RAM base and reservations differ per board | upstream ADT builder |
-| UFS LUN/partition of the root | board layout | 0080 |
-| Touch, keys, PMIC | different parts on the G54 | 0085, 0149/0150, 0154 |
+### Local patched tree (no Mac, no CI round trip)
+
+`scripts/xnu_tree.sh` rebuilds the exact source tree CI compiles and runs
+CI's patch checks locally (macOS, Linux, or Git Bash on Windows; needs git,
+Python and network for the first run):
+
+```sh
+sh scripts/xnu_tree.sh setup                          # out/base + out/xnu: Apple xnu-8796.141.3 + whole series (committed)
+sh scripts/xnu_tree.sh setup 0210-g54-usb-console.patch   # same, but 0210 left as editable working changes
+#   edit out/xnu/...
+sh scripts/xnu_tree.sh diff patches/0210-g54-usb-console.patch   # working changes -> patch (header kept)
+sh scripts/xnu_tree.sh gate patches/0210-g54-usb-console.patch   # forward apply + reverse-check every G54 patch
+sh scripts/xnu_tree.sh hash                           # new G54_PATCHSET_SHA256 for config/kernel.env
+```
+
+On Windows set `PYTHON=python`. The tree is cloned with LF line endings;
+patches are applied from LF copies (`out/lfpatches/`), because Git for
+Windows checks the repository out with CRLF. The libpthread/BearSSL/HFS
+staging scripts may be skipped on Windows; that only drops the HFS patches
+0031/0041, which no G54 patch touches.
+
+Why the gate matters: `build.sh` silently **skips** a patch that does not
+apply, and `kernel.yml`'s "G54 patches applied" step reverse-checks every G54
+patch against the final tree. A new hunk within 3 lines of another G54
+patch's hunk breaks that patch's reverse check (E42); a file created by one
+G54 patch must be changed in that patch, not a later one.
+
+Not compiled locally: the kernel needs Xcode 16.0 (CI, ~5 min). Before
+pushing, a syntax/type check with any clang against stub headers catches most
+mistakes in new C files (see the E42–E47 run card). Remember that a push to a
+PR branch cancels its running kernel build.
 
 ## Not here yet
 
-- A G54 boot-image packer: ruby's `tools/image` handles its 128 MiB header v2
-  image; the G54 format is unknown until M1.
-- Local compilation: needs Xcode 16.0 on the host; deferred until it would
-  clearly speed up development.
+- Local kernel compilation (Xcode 16.0); CI is fast enough so far.

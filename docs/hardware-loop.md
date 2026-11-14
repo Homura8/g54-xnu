@@ -226,6 +226,55 @@ fastboot flash boot_a out/x/boot.img && fastboot reboot
   `xnu-8796.141.3`, apply the series in glob order like `darwin-xnu-build`),
   update `G54_PATCHSET_SHA256`, push, wait for `kernel.yml` (~10 min).
 
+## 3c. The USB loop (2026-11-14, E47–E50): no photos, no buttons
+
+With kernel patch 0210 and `g54usb=1` the phone is a USB serial console
+while iOS runs ([usb-console.md](usb-console.md)). The standard iteration:
+
+```sh
+python3 scripts/g54_usb.py fastboot          # phone syncs and reboots into Fastboot
+fastboot getvar product; fastboot getvar current-slot; fastboot getvar snapshot-update-status
+fastboot flash boot_a out/x/<image>.img && fastboot reboot
+python3 scripts/g54_usb.py wait              # port appears ~60 s after reboot
+python3 scripts/g54_usb.py log --seconds 20 --grep "CRASH|panic|G54"
+python3 scripts/g54_usb.py home              # unlock; then tap/swipe/key as the test needs
+python3 scripts/g54_usb.py shot              # 270x600 PNG in out/usbshots/
+```
+
+- A **panic** still ends in Fastboot (`g54panicreset`, `getvar reason` =
+  `preloader set fastboot mode`) and kills the USB console with the kernel.
+  To read the panic: keep the phone in Fastboot, flash an image whose probe
+  shows the previous-boot log (`-D LASTLOG_S=20 -D LASTLOG_RING=… -D
+  LASTLOG_TOTAL=…` for that kernel's `sweet_log_ring`/`sweet_log_total` from
+  `llvm-nm`; status.md lists the current addresses) and photograph it, or
+  ask the owner to photograph the panic screen itself.
+- The first boot after a phone without 0210 still needs Power + Volume Down
+  for Fastboot.
+
+### Rebuilding `out/` on any host (macOS or Windows, no WSL)
+
+Downloads the owner provides (never committed): the iPhone X IPSW
+(`iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw`) and Motorola's 5-8-6
+package (the `.xml.zip`, or the folder Motorola Software Fix downloads; do not
+let Software Fix flash). Put both in `out/dl/`. Then:
+
+```sh
+P=out/dl/CANCUNF_G_SYS_V1TDS35H.83_20_5_8_6_subsidy_DEFAULT_regulatory_DEFAULT_cid50_CFC.xml
+mkdir -p out/fw out/ipsw out/touch out/vb
+cp "$P/boot.img" out/fw/boot.img                      # sha256 must be e0fe4010...37cc2d4
+python3 scripts/fw_tools.py super "$P" vendor_a out/vb/vendor_a.img
+python3 scripts/fw_tools.py erofs cat out/vb/vendor_a.img firmware/novatek_ts_fw.bin out/touch/novatek_ts_fw.bin   # ee3f50e7...
+python3 scripts/fw_tools.py ipsw-dt out/dl/iPhone10,3,iPhone10,6_16.7.16_20H392_Restore.ipsw d22ap out/ipsw/d22ap.adt  # 9e670987...
+#   (Windows/Linux: sh scripts/build_lzfse.sh out/tools/lzfse, then add out/tools/lzfse/lzfse.dll as last argument)
+git init -q out/topaz && git -C out/topaz fetch -q --depth 1 https://github.com/MakrSas/ios-topaz.git <BASE_SHA> && git -C out/topaz checkout -q FETCH_HEAD
+gh run download <run-id> -R Homura8/g54-xnu -n g54-xnu-kernel -D out/k<N>   # latest successful kernel.yml run
+```
+
+Check the hashes against status.md before flashing anything built from them.
+Hardware facts for new drivers come from the same package:
+`fw_tools.py ramdisk` (vendor_boot modules), `fw_tools.py dtb` (device-tree
+nodes) and `fw_tools.py ko-table` (tables in stock modules, e.g. clock gates).
+
 ## 4. Keep small evidence, not giant logs or rebuilds
 
 For every test record a private run card with date UTC, repo commit, toolchain
