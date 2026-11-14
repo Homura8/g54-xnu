@@ -49,7 +49,7 @@ direct kernels.
   collected M1 ADB and Fastboot hardware facts; firmware-image and recovery
   verification remain outstanding. See the checkpoint below.
 
-## ▶ Resume here (handoff, 14 November 2026 08:00 UTC)
+## ▶ Resume here (handoff, 14 November 2026 08:20 UTC)
 
 **State:** iOS 16.7.16 boots to SpringBoard on the G54 in ~2–3 min on **all
 eight CPUs** (six A55 + two A78, E35) with **real touch, all three side keys**
@@ -61,7 +61,8 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E39** (kernel K12, `halt_restart_timeout=60`);
+**Phone:** `boot_a` holds **E41** (= E39 + `sweetsample=-`; kernel K12,
+`halt_restart_timeout=60`);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
 **Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
@@ -94,10 +95,16 @@ out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 -D LASTLOG_RING=0x141c765f8 -D LASTLOG_TOTAL=0x141c765f0` (ring addresses are
 unchanged K4–K12; recompute with `llvm-nm` if a kernel changes them).
 
-**Next, in order:** (1) issue #14 volume-up + power wedges SpringBoard;
-#9/#13 About hangs, Storage crashes (need logs: the LASTLOG page after a
-forced restart; a restart from iOS loses the log); (2) performance (GPU-less
-rendering is the real limit); (3) RTC, battery, backlight.
+**Next, in order (owner decision, 14 November):** (1) **USB log channel**:
+port ruby's MUSB EP2 console log (patches 0086–0195, host tool
+`out/ruby/tools/host/ruby_usb_host.py`, WinUSB on Windows) to the G54's
+`mediatek,mt6855-usb20` / `musb-hdrc` controller, so whole logs are read
+live instead of one bit-decayed screen per forced restart (forced restarts
+can also be cold: E41). Start by scoping: G54 USB base/PHY/clocks from the
+stock DTB vs ruby's MT6877 values; (2) issue #14 with that log (E40/E41:
+the key thread most likely blocks in `dispatchEvent` after the chord's
+power-down event); #9/#13 About hangs, Storage crashes; (3) performance
+(GPU-less rendering is the real limit); (4) RTC, battery, backlight.
 
 **Process lessons:** never use PMIF SWINF 0 (AP = SWINF 2); any push to the PR
 branch cancels the running kernel build (`cancel-in-progress`), so batch
@@ -149,7 +156,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | --- | --- | --- |
 | 1 | ~~**No touch** in iOS~~ **fixed in E26** | One boot of E27 (unchanged kernel) had **no touch in iOS**; cause unknown. The 0202 start-up chip check ran once and gave up on failure; it now retries until it succeeds and reprograms SPI3 after ~2 s of failed reads. Polled at 8 ms; no IRQ (EINT22), no firmware reload on chip watchdog (FD/FE reports are only counted), probe-side download only |
 | 2 | ~~**No buttons**~~ **fixed in [E28](experiments/2026-11-13-e28-ios-keys.md)** | Kernel 0203 (`g54keys=1`): volume up = KPD `0x1c00e000` KP_MEM1 bit 0; power/volume down = MT6363 TOPSTATUS `0x1e` bits 1/3 over SPMI through the AP channel SWINF 2 (`PMIF 0x1c804000 + 0x880`). Never use SWINF 0 (E27: lost touch). Volume HUD appears on the left (iPhone layout) |
-| 3 | **Garbled framebuffer after the Apple logo and on sleep** (E20, E28) | The probe drew its info screen into OVL1 L0 (`FE0D0000`, pitch 0x1100) too; it shows whenever iOS hides its OVL0 layer. Fixed in the probe (VRAM cleared before the jump), first used in E29; sleep will then show black with the backlight still on (no backlight driver) |
+| 3 | ~~**Garbled framebuffer after the Apple logo and on sleep**~~ **fixed** (E20, E28; owner confirmed 14 November 2026) | The probe drew its info screen into OVL1 L0 (`FE0D0000`, pitch 0x1100) too; it shows whenever iOS hides its OVL0 layer. Fixed in the probe (VRAM cleared before the jump), first used in E29; sleep will then show black with the backlight still on (no backlight driver) |
 | 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
 | 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |
 | 6 | **Composition glitches**: red clock, no wallpaper, white dock, blank widgets | May share one cause (owner's suggestion): missing/incorrect blending or colour format in the software compositor (alpha/premultiplied, BGRA vs RGBA, or CoreAnimation falling back without GPU). Compare with ruby's/topaz screenshots and the SweetFramebuffer pixel format before changing anything |
@@ -160,7 +167,7 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
 | 12 | ~~**"Slide to power off" panics → Fastboot**~~ **fixed in E39** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). [E36b](experiments/2026-11-13-e36-shutdown.md): shutdown then stalled at `unmount(0) /` (HFS+ root on SWEET UFS) → 30 s `Halt/Restart Timed Out` panic; kernel 0208 skips the root unmount at halt. E37/E37b: iOS teardown itself stalls (launchd waiting on services, `ifnet_detach_final` waiting on `utun2`); kernel 0209 syncs and powers off when the halt timer (`halt_restart_timeout=60`) expires. [E38](experiments/2026-11-14-e38-halt-timeout.md): the timer and sync run, but `Halt/Restart Timed Out @IOPlatformExpert.cpp:900` (0209's fallback) because 0207's `smc` was never assembled (`;` is a comment in Apple's assembler); fixed in 0207 (K12). **[E39](experiments/2026-11-14-e39-shutdown.md): fixed — Shut Down powers off in ~15 s on battery; with USB power the phone restarts after powering off (charger behaviour). Restart from iOS boots back into iOS**  |
 | 13 | **Settings → General → Storage crashes Settings** (E35) | Unknown; needs the crash log (LASTLOG page after a crash, or launchd output) |
-| 14 | **Volume up + power (power-off menu gesture) wedges SpringBoard** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile |
+| 14 | **Volume up + power (power-off menu gesture) wedges SpringBoard** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile. [E40/E41](experiments/2026-11-14-e40-e41-chord-wedge.md): after `key 0xe9 down` + `key 0x30 down` no key event is logged again (no releases, no later presses), so the 0203 key thread most likely blocks in `dispatchEvent` → user-client gate; the SpringBoard sampler is ruled out (E41 `sweetsample=-` still wedges) |
 
 ## Previous: fast boot to the iOS lock screen
 
