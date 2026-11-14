@@ -71,11 +71,18 @@ class FindPortTests(unittest.TestCase):
 
 class G54UsbTests(unittest.TestCase):
     def test_command_matches_its_own_sequence_number(self):
-        stale = b"G54 USB: done tap #3\nG54 USB: done tap #43\n"   # replayed lines must not match
+        stale = b"G54 USB: ok pong #1\nG54 USB: done tap #3\nG54 USB: done tap #43\n"   # replayed lines must not match
         sess = g54_usb.Session(FakePort(stale))
         seq, reply = sess.command("tap 10 20 60")
         self.assertEqual(seq, 43)
         self.assertEqual(reply, "G54 USB: done tap #43")
+
+    def test_shot_ignores_replayed_pong(self):
+        stale = b"G54 USB: ok pong #1\nG54 USB: ok pong #42\n"
+        sess = g54_usb.Session(FakePort(stale))
+        w, h, rgb = sess.shot("low", timeout=5)
+        self.assertEqual((w, h), (3, 2))
+        self.assertEqual(rgb, bytes(range(18)))
 
     def test_shot_frame_is_cut_by_length(self):
         sess = g54_usb.Session(FakePort())

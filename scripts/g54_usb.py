@@ -107,6 +107,7 @@ class Port:
 
     def __init__(self, name, replay=False):
         self.name = name
+        self._prebuf = b""
         if os.name == "nt":
             self._open_win(name, replay)
         else:
@@ -159,12 +160,52 @@ class Port:
         import tty
         self._fd = os.open(name, os.O_RDWR | os.O_NOCTTY)
         tty.setraw(self._fd)
-        bits = struct.pack("I", termios.TIOCM_DTR | (termios.TIOCM_RTS if replay else 0))
-        fcntl.ioctl(self._fd, termios.TIOCMBIS, bits)
-        if not replay:
-            fcntl.ioctl(self._fd, termios.TIOCMBIC, struct.pack("I", termios.TIOCM_RTS))
+        if replay:
+            bits = struct.pack("I", termios.TIOCM_DTR | termios.TIOCM_RTS)
+            fcntl.ioctl(self._fd, termios.TIOCMBIS, bits)
+            return
+        # macOS CDC-ACM asserts DTR+RTS inside open(), starting a ring replay
+        # before TIOCMBIC can clear RTS. Bounce DTR low with RTS clear, let the
+        # phone's 1 ms USB poll see DTR=0, then raise DTR alone for a live tail.
+        fcntl.ioctl(self._fd, termios.TIOCMBIC, struct.pack("I", termios.TIOCM_DTR | termios.TIOCM_RTS))
+        time.sleep(0.03)
+        fcntl.ioctl(self._fd, termios.TIOCMBIS, struct.pack("I", termios.TIOCM_DTR))
+        self._discard_preopen_replay()
+
+    def _discard_preopen_replay(self):
+        import select
+        buf = b""
+        marker = b"G54 USB: port open (live)"
+        end = time.time() + 0.5
+        while time.time() < end:
+            if not select.select([self._fd], [], [], 0.05)[0]:
+                if buf:
+                    break
+                continue
+            chunk = os.read(self._fd, 1 << 16)
+            if not chunk:
+                break
+            buf += chunk
+            idx = buf.rfind(marker)
+            if idx != -1:
+                nl = buf.find(b"\n", idx)
+                if nl != -1:
+                    self._prebuf = buf[nl + 1:]
+                    return
+
+    def drain(self):
+        self._prebuf = b""
+        if os.name == "nt":
+            return
+        import select
+        while select.select([self._fd], [], [], 0)[0]:
+            if not os.read(self._fd, 1 << 16):
+                break
 
     def read(self, n=1 << 16):
+        if self._prebuf:
+            chunk, self._prebuf = self._prebuf[:n], self._prebuf[n:]
+            return chunk
         if os.name == "nt":
             return self._read_win(n)
         import select
@@ -212,9 +253,17 @@ class Session:
             self._fill()
         raise TimeoutError("no reply matching %r within %ss" % (pattern, timeout))
 
+    def _drain(self):
+        if hasattr(self.p, "drain"):
+            self.p.drain()
+        else:
+            while self.p.read():
+                pass
+        self.buf = b""
+
     def command(self, text, timeout=15.0, done=True):
         """ping to learn the sequence number, then send text and wait for its own reply."""
-        self.buf = b""
+        self._drain()
         self.p.write(b"\nping\n")
         seq = int(self.wait_line(rb"G54 USB: ok pong #(\d+)", 10).rsplit("#", 1)[1])
         self.p.write(text.encode() + b"\n")
@@ -223,7 +272,7 @@ class Session:
         return want, self.wait_line(pat, timeout)
 
     def shot(self, size, timeout):
-        self.buf = b""
+        self._drain()
         self.p.write(b"\nping\n")
         seq = int(self.wait_line(rb"G54 USB: ok pong #(\d+)", 10).rsplit("#", 1)[1])
         self.p.write(b"shot " + size.encode() + b"\n")
