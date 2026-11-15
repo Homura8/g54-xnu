@@ -2,10 +2,10 @@ G54: diagnostic com_apple_driver_FairPlayIOKit stub (g54fpstub=1)
 
 diff --git a/iokit/Kernel/arm/SweetFairPlay.cpp b/iokit/Kernel/arm/SweetFairPlay.cpp
 new file mode 100644
-index 0000000..58e86ce
+index 0000000..ebd76ad
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetFairPlay.cpp
-@@ -0,0 +1,88 @@
+@@ -0,0 +1,96 @@
 +/*
 + * Diagnostic FairPlayIOKit stub for G54 / SWEET, gated on g54fpstub=1.
 + *
@@ -30,19 +30,27 @@ index 0000000..58e86ce
 +	OSDeclareDefaultStructors(com_apple_driver_FairPlayIOKit);
 +
 +public:
++	IOService *probe(IOService *provider, SInt32 *score) APPLE_KEXT_OVERRIDE;
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 +};
 +
 +OSDefineMetaClassAndStructors(com_apple_driver_FairPlayIOKit, IOService);
 +
-+bool
-+com_apple_driver_FairPlayIOKit::start(IOService *provider)
++IOService *
++com_apple_driver_FairPlayIOKit::probe(IOService *provider, SInt32 *score)
 +{
 +	int on = 0;
 +
++	/* Decline in probe (no instance is started) unless g54fpstub=1. */
 +	if (!PE_parse_boot_argn("g54fpstub", &on, sizeof(on)) || on != 1) {
-+		return false;
++		return NULL;
 +	}
++	return IOService::probe(provider, score);
++}
++
++bool
++com_apple_driver_FairPlayIOKit::start(IOService *provider)
++{
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}

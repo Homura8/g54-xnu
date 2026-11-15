@@ -1,4 +1,4 @@
-G54: read MT6685 PMIC hardware RTC over SPMI slave 9 and publish IORTC
+G54: read MT6685 PMIC hardware RTC over SPMI slave 9 (IORTC resource only with g54iortc=1)
 
 diff --git a/bsd/conf/files b/bsd/conf/files
 index 821ff68..ca49437 100644
@@ -343,7 +343,7 @@ index aad71ac..732098e 100644
  }
  
 diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
-index 973bb70..8c932a7 100644
+index 973bb70..b52143b 100644
 --- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
 +++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
 @@ -20,6 +20,8 @@ static RubyEINTParent *gRubyEINTParent;
@@ -355,12 +355,20 @@ index 973bb70..8c932a7 100644
  class SweetPlatformExpert : public IODTPlatformExpert {
  	OSDeclareDefaultStructors(SweetPlatformExpert);
  
-@@ -157,6 +159,8 @@ SweetPlatformExpert::start(IOService *provider)
+@@ -157,6 +159,16 @@ SweetPlatformExpert::start(IOService *provider)
  			OSSafeRelease(kpd);
  		}
  	}
 +	g54_rtc_init();
-+	publishResource("IORTC");
++	/*
++	 * K24 published IORTC here unconditionally and failed to boot (E61c).
++	 * Without it IOKitInitializeTime waits 30 s as before and then reads
++	 * the RTC through getUTCTimeOfDay anyway. g54iortc=1 restores it.
++	 */
++	gate = 0;
++	if (PE_parse_boot_argn("g54iortc", &gate, sizeof(gate)) && gate == 1) {
++		publishResource("IORTC");
++	}
  	return true;
  }
  
