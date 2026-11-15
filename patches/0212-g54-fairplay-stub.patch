@@ -103,7 +103,7 @@ index 0000000..ebd76ad
 +}
 +#endif /* SWEET */
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
-index a059ebc..98d10ba 100644
+index a059ebc..ab59afb 100644
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
 @@ -87,6 +87,11 @@ const char * gIOKernelConfigTables =
@@ -111,9 +111,9 @@ index a059ebc..98d10ba 100644
      "     'IOMatchCategory' = SweetBattery;"
      "   },"
 +    "   {"
-+    "     'IOClass'         = com_apple_driver_FairPlayIOKit;"
++    "     'IOClass'         = 'com_apple_driver_FairPlayIOKit';"
 +    "     'IOProviderClass' = IOResources;"
-+    "     'IOMatchCategory' = com_apple_driver_FairPlayIOKit;"
++    "     'IOMatchCategory' = 'com_apple_driver_FairPlayIOKit';"
 +    "   },"
  #endif
      "   {"
