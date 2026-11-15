@@ -343,18 +343,24 @@ index aad71ac..732098e 100644
  }
  
 diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
-index 973bb70..a5fb537 100644
+index 973bb70..8c932a7 100644
 --- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
 +++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
-@@ -157,6 +157,11 @@ SweetPlatformExpert::start(IOService *provider)
+@@ -20,6 +20,8 @@ static RubyEINTParent *gRubyEINTParent;
+ static RubyGICInterruptController *gRubyGIC;
+ static SweetGoodixTouch *gSweetGoodixTouch;
+ 
++extern "C" void g54_rtc_init(void);
++
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+ 
+@@ -157,6 +159,8 @@ SweetPlatformExpert::start(IOService *provider)
  			OSSafeRelease(kpd);
  		}
  	}
-+	{
-+		extern "C" void g54_rtc_init(void);
-+		g54_rtc_init();
-+		publishResource("IORTC");
-+	}
++	g54_rtc_init();
++	publishResource("IORTC");
  	return true;
  }
  
