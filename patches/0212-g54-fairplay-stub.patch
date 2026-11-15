@@ -1,0 +1,124 @@
+G54: diagnostic com_apple_driver_FairPlayIOKit stub (g54fpstub=1)
+
+diff --git a/iokit/Kernel/arm/SweetFairPlay.cpp b/iokit/Kernel/arm/SweetFairPlay.cpp
+new file mode 100644
+index 0000000..58e86ce
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetFairPlay.cpp
+@@ -0,0 +1,88 @@
++/*
++ * Diagnostic FairPlayIOKit stub for G54 / SWEET, gated on g54fpstub=1.
++ *
++ * fairplayd.H2 exits before bootstrap_check_in if IOServiceGetMatchingServices
++ * for com_apple_driver_FairPlayIOKit finds 0 services, leaving LaunchDaemons
++ * (checkpointd -> Photos, locationd -> Settings Date & Time) blocked on
++ * synchronous MIG calls to com.apple.fairplayd.H2. Registering the service and
++ * logging calls shows which selectors fairplayd.H2 requires next.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <pexpert/pexpert.h>
++#include <sys/proc.h>
++
++class com_apple_driver_FairPlayIOKit : public IOService {
++	OSDeclareDefaultStructors(com_apple_driver_FairPlayIOKit);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(com_apple_driver_FairPlayIOKit, IOService);
++
++bool
++com_apple_driver_FairPlayIOKit::start(IOService *provider)
++{
++	int on = 0;
++
++	if (!PE_parse_boot_argn("g54fpstub", &on, sizeof(on)) || on != 1) {
++		return false;
++	}
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "com_apple_driver_FairPlayIOKitUserClient");
++	registerService();
++	IOLog("SWEET FP: com_apple_driver_FairPlayIOKit registered (diag stub)\n");
++	return true;
++}
++
++class com_apple_driver_FairPlayIOKitUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(com_apple_driver_FairPlayIOKitUserClient);
++
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(com_apple_driver_FairPlayIOKitUserClient, IOUserClient);
++
++IOReturn
++com_apple_driver_FairPlayIOKitUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++com_apple_driver_FairPlayIOKitUserClient::externalMethod(uint32_t selector,
++    IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
++    __unused void *reference)
++{
++	uint32_t in_scalars = args->scalarInputCount;
++	uint32_t in_struct = args->structureInputDescriptor != NULL ?
++	    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
++	uint32_t out_scalars = args->scalarOutputCount;
++	uint32_t out_struct = args->structureOutputDescriptor != NULL ?
++	    (uint32_t)args->structureOutputDescriptor->getLength() : args->structureOutputSize;
++	uint64_t arg0 = in_scalars > 0 ? args->scalarInput[0] : 0;
++	char name[32];
++
++	IOReturn ret = kIOReturnUnsupported;
++
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET FP: %s sel %u arg0 %llu in %u/%u out %u/%u -> 0x%x\n",
++	    name, selector, arg0, in_scalars, in_struct, out_scalars, out_struct, ret);
++	return ret;
++}
++#endif /* SWEET */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index a059ebc..98d10ba 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -87,6 +87,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetBattery;"
+     "   },"
++    "   {"
++    "     'IOClass'         = com_apple_driver_FairPlayIOKit;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = com_apple_driver_FairPlayIOKit;"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index a716da8..c7c1dcf 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -22,6 +22,7 @@ iokit/Kernel/arm/SweetSurface.cpp                                optional iokitc
+ iokit/Kernel/arm/SweetFramebuffer.cpp                            optional iokitcpp
+ iokit/Kernel/arm/SweetNetwork.cpp                                optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
++iokit/Kernel/arm/SweetFairPlay.cpp                               optional iokitcpp
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
