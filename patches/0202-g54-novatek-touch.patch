@@ -24,10 +24,10 @@ index c604511..f9509b8 100644
  bsd/dev/ruby_battery.c			standard
 diff --git a/bsd/dev/g54_nvt_touch.c b/bsd/dev/g54_nvt_touch.c
 new file mode 100644
-index 0000000..ace3b19
+index 0000000..9bce226
 --- /dev/null
 +++ b/bsd/dev/g54_nvt_touch.c
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,387 @@
 +/*
 + * G54 (Moto G54, MT6855): Novatek NT36672C touch over SPI3, polled.
 + *
@@ -98,7 +98,7 @@ index 0000000..ace3b19
 +	uint32_t period_ms;
 +	uint32_t page;
 +	bool down[NVT_FINGERS];
-+	uint64_t frames, spi_err, wdt, recovery, touches, bad_sum;
++	uint64_t frames, spi_err, wdt, recovery, touches, idle, bad_sum;
 +	uint32_t sck, fail_run;
 +	bool started;
 +} nvt;
@@ -148,13 +148,14 @@ index 0000000..ace3b19
 +	}
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	nvt_wr(S_CMD, C_MSB | C_ACT);
-+	nanoseconds_to_absolutetime(2 * NSEC_PER_MSEC, &end);
++	nanoseconds_to_absolutetime(10 * NSEC_PER_MSEC, &end);
 +	end += mach_absolute_time();
 +	do {
 +		if (nvt_rd(S_ST0) & 1) {
 +			ok = 1;
 +			break;
 +		}
++		delay(1);
 +		now = mach_absolute_time();
 +	} while (now < end);
 +	if (ok && rx) {
@@ -257,8 +258,16 @@ index 0000000..ace3b19
 +		sum = (uint8_t)(sum + d[i]);
 +	}
 +	if ((uint8_t)(-sum) != d[64]) {
-+		nvt.bad_sum++;   /* idle buffers may not carry a valid sum: not a bus failure */
-+		return;         /* torn or invalid frame: keep the previous state */
++		if (d[0] == 0xff && d[1] == 0xff && d[2] == 0xff) {
++			nvt.idle++;
++		} else {
++			if (nvt.bad_sum < 3) {
++				printf("G54 NVT: bad_sum sample %02x %02x %02x %02x sum %02x got %02x\n",
++				    d[0], d[1], d[2], d[3], (uint8_t)(-sum), d[64]);
++			}
++			nvt.bad_sum++;
++		}
++		return;         /* idle or torn frame: keep the previous state */
 +	}
 +	if (d[0] == 0xfd && d[1] == 0xfd && d[2] == 0xfd) {
 +		if (nvt.wdt++ < 4) {
@@ -319,7 +328,7 @@ index 0000000..ace3b19
 +	 * between sck 9 (E26) and the probe's proven sck 31.
 +	 */
 +	for (;; attempt++) {
-+		nvt_spi_setup((attempt & 1) ? 31u : 9u);
++		nvt_spi_setup((attempt & 1) ? 9u : 31u);
 +		bzero(id, sizeof(id));
 +		r0 = nvt_read(NVT_TRIM, id, 6);
 +		if (r0 && id[3] == 0x72 && id[4] == 0x66 && id[5] == 0x03) {
@@ -331,7 +340,7 @@ index 0000000..ace3b19
 +		}
 +		nvt_wait_ms(500);
 +	}
-+	nvt.sck = (attempt & 1) ? 31u : 9u;
++	nvt.sck = (attempt & 1) ? 9u : 31u;
 +	bzero(st, sizeof(st));
 +	bzero(info, sizeof(info));
 +	r1 = nvt_read(NVT_EVT + 0x60, st, 1);
@@ -361,8 +370,8 @@ index 0000000..ace3b19
 +		if (mach_absolute_time() > next_log) {
 +			uint64_t t;
 +			if (next_log) {
-+				printf("G54 NVT: frames %llu touches %llu spi_err %llu bad_sum %llu wdt %llu rec %llu\n",
-+				    nvt.frames, nvt.touches, nvt.spi_err, nvt.bad_sum, nvt.wdt, nvt.recovery);
++				printf("G54 NVT: frames %llu touches %llu spi_err %llu idle %llu bad_sum %llu wdt %llu rec %llu\n",
++				    nvt.frames, nvt.touches, nvt.spi_err, nvt.idle, nvt.bad_sum, nvt.wdt, nvt.recovery);
 +			}
 +			nanoseconds_to_absolutetime(60ull * NSEC_PER_SEC, &t);
 +			next_log = mach_absolute_time() + t;

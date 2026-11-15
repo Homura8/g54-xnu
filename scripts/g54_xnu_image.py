@@ -117,6 +117,26 @@ def build_adt(adt, mkadt, ncpu, ufs=False, d22ap=None):
         n.children = []
         nodes.append(n)
     cpus.children = nodes
+    arm_io = next(c for c in root.children if name(c) == "arm-io")
+    if not any(name(c) == "marconi-wifi" for c in arm_io.children):
+        max_ph = 0x8ff
+        def walk_ph(node):
+            nonlocal max_ph
+            for k, _, v in node.props:
+                if k == "AAPL,phandle" and len(v) == 4:
+                    max_ph = max(max_ph, struct.unpack("<I", v)[0])
+            for ch in node.children:
+                walk_ph(ch)
+        walk_ph(root)
+        wifi = adt.Node()
+        wifi.props = [
+            ("name", 0, mkadt.cstr("marconi-wifi")),
+            ("AAPL,phandle", 0, mkadt.u32(max_ph + 1)),
+            ("compatible", 0, mkadt.cstr("marconi-wifi")),
+            ("mac-address-wifi0", 0, bytes([0x02, 0x54, 0x00, 0x00, 0x00, 0x01])),
+        ]
+        wifi.children = []
+        arm_io.children.append(wifi)
     blob = adt.serialize(root)
     adt.parse(blob)  # round-trip check
     return blob

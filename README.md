@@ -8,10 +8,11 @@ secure iOS device.
 **What works on the G54 today** (details: [docs/status.md](docs/status.md)):
 the stock LK bootloader starts our payload, XNU boots on all eight CPUs,
 mounts an iOS 16.7.16 root from UFS and reaches **SpringBoard** with real
-touch and side keys; Settings → Shut Down and restart work; a **USB
-console** gives the kernel log, screenshots and touch/key input over one
-cable. Still missing: GPU (software rendering, ~8 fps), audio, RTC, battery,
-backlight, telephony.
+touch, side keys, and live MT6685 PMIC hardware **RTC** (`g54iortc=1`);
+Settings → Shut Down and restart work; a **USB console** gives the kernel
+log, screenshots and touch/key input over one cable. Still missing: GPU
+(software rendering, ~8 fps), networking transport (Wi-Fi / USB net),
+audio, battery, backlight, FairPlay/DRM, telephony.
 
 ## Start here
 
@@ -55,7 +56,7 @@ cases); everything derived lives in Git-ignored `out/`.
 | `scripts/fw_tools.py`, `build_lzfse.sh` | Read-only firmware extraction (super/EROFS/ramdisk/DTB/.ko tables/IM4P) |
 | `scripts/xnu_tree.sh` | Local patched XNU tree and CI's patch checks |
 | `scripts/mkiosroot-macos.sh` | Builds the iOS root image (macOS) |
-| `docs/experiments/` | One run card per hardware experiment (E0–E50…) |
+| `docs/experiments/` | One run card per hardware experiment (E0–E64) |
 
 ## Build the kernel
 

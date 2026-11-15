@@ -1,0 +1,374 @@
+G54: read MT6685 PMIC hardware RTC over SPMI slave 9 (IORTC resource only with g54iortc=1)
+
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 821ff68..ca49437 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -130,6 +130,8 @@ bsd/dev/unix_startup.c			standard
+ bsd/dev/monotonic.c optional monotonic
+ bsd/dev/dev_perfmon.c optional config_perfmon
+ 
++bsd/dev/g54_rtc.c			standard
++
+ bsd/libkern/crc32.c			standard
+ bsd/libkern/random.c			standard
+ bsd/libkern/scanc.c			standard
+diff --git a/bsd/dev/g54_rtc.c b/bsd/dev/g54_rtc.c
+new file mode 100644
+index 0000000..b45008f
+--- /dev/null
++++ b/bsd/dev/g54_rtc.c
+@@ -0,0 +1,286 @@
++/*
++ * G54 (Moto G54, MT6855): MT6685 PMIC hardware RTC over SPMI slave 9.
++ *
++ * Register offsets and trigger/reload/mclk sequences come from stock
++ * vendor_boot DTB (spmi@1c804000/mt6685_mfd@9/mt6685_rtc base=0x580)
++ * and rtc-mt6685.ko disassembly:
++ *   0x3a8=0x15, 0x3a9=0x63, 0x516=0x10 (+1ms) enable RTC mclk
++ *   0x588 |= 0x4320, 0x580 = 1, poll 0x588 bit 6 == 0 (reload + trigger)
++ *   0x3a8=0x15, 0x3a9=0x63, 0x515=0x10 (+1ms) power down mclk
++ *   0x592..0x59e (step 2): sec&0x3f, min&0x3f, hour&0x1f, dom&0x1f,
++ *     skip dow, mon&0xf (1..12), year&0x7f (since 1968).
++ *
++ * Enabled by default (disable with g54rtc=0). Writes from setUTCTimeOfDay
++ * are logged only unless g54rtc_wr=1.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <kern/clock.h>
++#include <libkern/libkern.h>
++#include <pexpert/pexpert.h>
++
++extern int g54_spmi_read(uint32_t sid, uint32_t addr, uint32_t len, uint32_t *val);
++extern int g54_spmi_write(uint32_t sid, uint32_t addr, uint32_t len, uint32_t val);
++
++void g54_rtc_init(void);
++int g54_rtc_get_utc(long *secs_out);
++void g54_rtc_set_utc(long secs);
++
++#define G54_RTC_SID         9u
++#define G54_RTC_WRTGR       0x580u
++#define G54_RTC_BBPU        0x588u
++#define G54_RTC_BBPU_RELOAD 0x4320u
++#define G54_RTC_BBPU_CBUSY  0x0040u
++#define G54_RTC_TC_SEC      0x592u
++#define G54_RTC_TC_MIN      0x594u
++#define G54_RTC_TC_HOU      0x596u
++#define G54_RTC_TC_DOM      0x598u
++#define G54_RTC_TC_MTH      0x59cu
++#define G54_RTC_TC_YEA      0x59eu
++
++static int g54_rtc_enabled = -1;
++static int g54_rtc_write_enabled = -1;
++static bool g54_rtc_err_logged;
++
++static int
++rtc_is_enabled(void)
++{
++	if (g54_rtc_enabled < 0) {
++		int v = 1;
++		PE_parse_boot_argn("g54rtc", &v, sizeof(v));
++		g54_rtc_enabled = (v != 0) ? 1 : 0;
++	}
++	return g54_rtc_enabled;
++}
++
++static int64_t
++rtc_days_from_civil(int y, int m, int d)
++{
++	int era, yoe, doy, doe;
++
++	y -= (m <= 2) ? 1 : 0;
++	era = (y >= 0 ? y : y - 399) / 400;
++	yoe = y - era * 400;
++	doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
++	doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
++	return (int64_t)era * 146097 + (int64_t)doe - 719468;
++}
++
++static void
++rtc_civil_from_days(int64_t z, int *yp, int *mp, int *dp)
++{
++	int64_t era, doe, yoe, doy, mp_i;
++	int y;
++
++	z += 719468;
++	era = (z >= 0 ? z : z - 146096) / 146097;
++	doe = z - era * 146097;
++	yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
++	y = (int)(yoe + era * 400);
++	doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
++	mp_i = (5 * doy + 2) / 153;
++	*dp = (int)(doy - (153 * mp_i + 2) / 5 + 1);
++	*mp = (int)(mp_i + (mp_i < 10 ? 3 : -9));
++	y += (*mp <= 2) ? 1 : 0;
++	*yp = y;
++}
++
++static int
++rtc_mclk_set(bool on)
++{
++	int rc;
++
++	rc = g54_spmi_write(G54_RTC_SID, 0x3a8u, 1u, 0x15u);
++	if (rc == 0) {
++		rc = g54_spmi_write(G54_RTC_SID, 0x3a9u, 1u, 0x63u);
++	}
++	if (rc == 0) {
++		rc = g54_spmi_write(G54_RTC_SID, on ? 0x516u : 0x515u, 1u, 0x10u);
++	}
++	if (rc == 0) {
++		delay(1000);
++	}
++	return rc;
++}
++
++static int
++rtc_write_trigger(void)
++{
++	int rc;
++	uint32_t bbpu = 0;
++
++	rc = g54_spmi_write(G54_RTC_SID, G54_RTC_WRTGR, 2u, 1u);
++	if (rc != 0) {
++		return rc;
++	}
++	for (int i = 0; i < 50; i++) {
++		rc = g54_spmi_read(G54_RTC_SID, G54_RTC_BBPU, 2u, &bbpu);
++		if (rc != 0) {
++			return rc;
++		}
++		if ((bbpu & G54_RTC_BBPU_CBUSY) == 0) {
++			return 0;
++		}
++		delay(1000);
++	}
++	return -4;
++}
++
++static int
++rtc_read_fields(int *yr, int *mon, int *dom, int *hr, int *min, int *sec)
++{
++	uint32_t bbpu = 0, s1 = 0, s2 = 0, mi = 0, h = 0, d = 0, mo = 0, y = 0;
++	int rc;
++
++	if (rtc_mclk_set(true) != 0) {
++		return -1;
++	}
++	rc = g54_spmi_read(G54_RTC_SID, G54_RTC_BBPU, 2u, &bbpu);
++	if (rc == 0) {
++		rc = g54_spmi_write(G54_RTC_SID, G54_RTC_BBPU, 2u,
++		    (bbpu & 0xffffu) | G54_RTC_BBPU_RELOAD);
++	}
++	if (rc == 0) {
++		rc = rtc_write_trigger();
++	}
++	(void)rtc_mclk_set(false);
++	if (rc != 0) {
++		return rc;
++	}
++
++	for (int tries = 0; tries < 3; tries++) {
++		if (g54_spmi_read(G54_RTC_SID, G54_RTC_TC_SEC, 2u, &s1) != 0 ||
++		    g54_spmi_read(G54_RTC_SID, G54_RTC_TC_MIN, 2u, &mi) != 0 ||
++		    g54_spmi_read(G54_RTC_SID, G54_RTC_TC_HOU, 2u, &h) != 0 ||
++		    g54_spmi_read(G54_RTC_SID, G54_RTC_TC_DOM, 2u, &d) != 0 ||
++		    g54_spmi_read(G54_RTC_SID, G54_RTC_TC_MTH, 2u, &mo) != 0 ||
++		    g54_spmi_read(G54_RTC_SID, G54_RTC_TC_YEA, 2u, &y) != 0 ||
++		    g54_spmi_read(G54_RTC_SID, G54_RTC_TC_SEC, 2u, &s2) != 0) {
++			return -2;
++		}
++		s1 &= 0x3fu;
++		s2 &= 0x3fu;
++		if (s2 >= s1) {
++			*sec = (int)s1;
++			*min = (int)(mi & 0x3fu);
++			*hr = (int)(h & 0x1fu);
++			*dom = (int)(d & 0x1fu);
++			*mon = (int)(mo & 0x0fu);
++			*yr = (int)(y & 0x7fu) + 1968;
++			return 0;
++		}
++	}
++	return -3;
++}
++
++static int
++rtc_read_epoch(int *yr_out, int *mon_out, int *dom_out,
++    int *hr_out, int *min_out, int *sec_out, long *secs_out)
++{
++	int yr = 0, mon = 0, dom = 0, hr = 0, min = 0, sec = 0;
++	int rc;
++	int64_t epoch;
++
++	if (!rtc_is_enabled()) {
++		return -1;
++	}
++	rc = rtc_read_fields(&yr, &mon, &dom, &hr, &min, &sec);
++	if (rc != 0 || yr < 2000 || yr > 2095 || mon < 1 || mon > 12 ||
++	    dom < 1 || dom > 31 || hr >= 24 || min >= 60 || sec >= 60) {
++		if (!g54_rtc_err_logged) {
++			g54_rtc_err_logged = true;
++			printf("G54 RTC: invalid/failed read rc %d (%04d-%02d-%02d %02d:%02d:%02d)\n",
++			    rc, yr, mon, dom, hr, min, sec);
++		}
++		return -1;
++	}
++	epoch = rtc_days_from_civil(yr, mon, dom) * 86400LL +
++	    (int64_t)hr * 3600LL + (int64_t)min * 60LL + (int64_t)sec;
++	if (yr_out) *yr_out = yr;
++	if (mon_out) *mon_out = mon;
++	if (dom_out) *dom_out = dom;
++	if (hr_out) *hr_out = hr;
++	if (min_out) *min_out = min;
++	if (sec_out) *sec_out = sec;
++	if (secs_out) *secs_out = (long)epoch;
++	return 0;
++}
++
++int
++g54_rtc_get_utc(long *secs_out)
++{
++	if (!secs_out) {
++		return -1;
++	}
++	return rtc_read_epoch(NULL, NULL, NULL, NULL, NULL, NULL, secs_out);
++}
++
++void
++g54_rtc_set_utc(long secs)
++{
++	int yr = 0, mon = 0, dom = 0, hr, min, sec;
++	int64_t days, rem;
++
++	if (!rtc_is_enabled() || secs < 946684800L) {
++		return;
++	}
++	if (g54_rtc_write_enabled < 0) {
++		int v = 0;
++		PE_parse_boot_argn("g54rtc_wr", &v, sizeof(v));
++		g54_rtc_write_enabled = (v == 1) ? 1 : 0;
++	}
++	days = (int64_t)secs / 86400LL;
++	rem = (int64_t)secs % 86400LL;
++	if (rem < 0) {
++		days--;
++		rem += 86400LL;
++	}
++	hr = (int)(rem / 3600LL);
++	rem %= 3600LL;
++	min = (int)(rem / 60LL);
++	sec = (int)(rem % 60LL);
++	rtc_civil_from_days(days, &yr, &mon, &dom);
++	if (yr < 1968 || yr > 2095) {
++		return;
++	}
++	if (!g54_rtc_write_enabled) {
++		printf("G54 RTC: set %04d-%02d-%02d %02d:%02d:%02d UTC skipped (g54rtc_wr=0)\n",
++		    yr, mon, dom, hr, min, sec);
++		return;
++	}
++	if (rtc_mclk_set(true) == 0) {
++		int rc = 0;
++		rc |= g54_spmi_write(G54_RTC_SID, G54_RTC_TC_SEC, 2u, (uint32_t)sec);
++		rc |= g54_spmi_write(G54_RTC_SID, G54_RTC_TC_MIN, 2u, (uint32_t)min);
++		rc |= g54_spmi_write(G54_RTC_SID, G54_RTC_TC_HOU, 2u, (uint32_t)hr);
++		rc |= g54_spmi_write(G54_RTC_SID, G54_RTC_TC_DOM, 2u, (uint32_t)dom);
++		rc |= g54_spmi_write(G54_RTC_SID, G54_RTC_TC_MTH, 2u, (uint32_t)mon);
++		rc |= g54_spmi_write(G54_RTC_SID, G54_RTC_TC_YEA, 2u, (uint32_t)(yr - 1968));
++		if (rc == 0) {
++			rc = rtc_write_trigger();
++		}
++		(void)rtc_mclk_set(false);
++		printf("G54 RTC: set %04d-%02d-%02d %02d:%02d:%02d UTC (rc %d)\n",
++		    yr, mon, dom, hr, min, sec, rc);
++	}
++}
++
++void
++g54_rtc_init(void)
++{
++	int yr = 0, mon = 0, dom = 0, hr = 0, min = 0, sec = 0;
++	long epoch = 0;
++
++	if (!rtc_is_enabled()) {
++		printf("G54 RTC: disabled (g54rtc=0)\n");
++		return;
++	}
++	if (rtc_read_epoch(&yr, &mon, &dom, &hr, &min, &sec, &epoch) == 0) {
++		printf("G54 RTC: %04d-%02d-%02d %02d:%02d:%02d UTC (epoch %ld)\n",
++		    yr, mon, dom, hr, min, sec, epoch);
++	}
++}
++
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index aad71ac..732098e 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -490,9 +490,22 @@ IOPlatformExpert::platformAdjustService(IOService */*service*/)
+ 	return true;
+ }
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++extern "C" int g54_rtc_get_utc(long *secs_out);
++extern "C" void g54_rtc_set_utc(long secs);
++#endif
++
+ void
+ IOPlatformExpert::getUTCTimeOfDay(clock_sec_t * secs, clock_nsec_t * nsecs)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	long rtc_secs = 0;
++	if (g54_rtc_get_utc(&rtc_secs) == 0) {
++		*secs = (clock_sec_t)rtc_secs;
++		*nsecs = 0;
++		return;
++	}
++#endif
+ 	*secs = getGMTTimeOfDay();
+ 	*nsecs = 0;
+ }
+@@ -500,6 +513,9 @@ IOPlatformExpert::getUTCTimeOfDay(clock_sec_t * secs, clock_nsec_t * nsecs)
+ void
+ IOPlatformExpert::setUTCTimeOfDay(clock_sec_t secs, __unused clock_nsec_t nsecs)
+ {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	g54_rtc_set_utc((long)secs);
++#endif
+ 	setGMTTimeOfDay(secs);
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 973bb70..b52143b 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -20,6 +20,8 @@ static RubyEINTParent *gRubyEINTParent;
+ static RubyGICInterruptController *gRubyGIC;
+ static SweetGoodixTouch *gSweetGoodixTouch;
+ 
++extern "C" void g54_rtc_init(void);
++
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+ 
+@@ -157,6 +159,16 @@ SweetPlatformExpert::start(IOService *provider)
+ 			OSSafeRelease(kpd);
+ 		}
+ 	}
++	g54_rtc_init();
++	/*
++	 * K24 published IORTC here unconditionally and failed to boot (E61c).
++	 * Without it IOKitInitializeTime waits 30 s as before and then reads
++	 * the RTC through getUTCTimeOfDay anyway. g54iortc=1 restores it.
++	 */
++	gate = 0;
++	if (PE_parse_boot_argn("g54iortc", &gate, sizeof(gate)) && gate == 1) {
++		publishResource("IORTC");
++	}
+ 	return true;
+ }
+ 
