@@ -51,6 +51,11 @@ direct kernels.
 
 ## ▶ Resume here (handoff, 15 November 2026)
 
+**New ([E61c–E64](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md), K26):**
+- **Hardware RTC (`#4` fixed with `g54iortc=1`, patch `0211`):** MT6685 PMIC RTC over SPMI slave 9 sets live wall-clock time (`G54 RTC: …`) and, with `g54iortc=1`, removes the 30 s `IOKitInitializeTime` stall (USB console COM8 ready at **26 s** instead of **57 s** in `E63b`).
+- **Root causes for `#16` (Photos black) and `#17` (Date & Time hang) found (`E64`):** `MobileSlideShow` blocks waiting on `checkpointd`, `Preferences` (`General → Date & Time`) blocks on `locationd`, and **both `checkpointd` and `locationd` hang calling `fairplayd.H2` MIG `0x4b3` (`1203`)**. Diagnostic stub `0212` (`g54fpstub=1`) unblocked `fairplayd.H2` through `IOServiceOpen` and selectors `22`/`23`/`21` (`552` B) before exiting on `kIOReturnUnsupported` (`E63`).
+- **`#9` (`About`), `#13` (`Storage`), `#20` (`NVT`), `#21` (`g54noexec`):** `About` waits in `AppleMediaServices`/`PassKitCore` (`E56`), `Storage` hits `SIGTRAP` in `PodcastsUI + 0x8dda8`, `0206` clean `EACCES` eliminates `CRASH`/`ReportCrash` spam (`#21` log noise), `scripts/g54_xnu_image.py` + `marconi-wifi` ADT satisfies `IONetworkController` matching (`1 candidate`, transport still missing for `#18`), and `0202` idle frames start with `d[0] == 0xff` (`ff 78 32 …`, next 1-line fix for `#20`).
+
 **New (E53, K23): the USB console works on macOS and survives replugging the
 cable while iOS runs** ([E53](experiments/2026-11-15-e53-usb-replug-macos.md)).
 The driver kept its USB address after a bus reset, so any replug under iOS
@@ -77,17 +82,17 @@ powers off and starts again, like Android's power-off charging), and a
 squares are gone (0204). The UI is
 still choppy (~8 fps): iOS renders in software without a GPU driver.
 
-**Phone:** `boot_a` holds **E53c** (kernel K23 = 0200–0210, CI run
-43615780625, patchset `dae8465d…`; best boot line below; probe
-`out/g1-fast-nolog` without the previous-boot page);
+**Phone:** `boot_a` holds **E64** (kernel **K26** = `0200`–`0212`, CI run
+`43707017931`, patchset `a5547bb4…`; `g54iortc=1` + `sweetsample=Preferences,timed,MobileSlideShow,locationd`; probe `out/g1-fast-nolog`);
 stock `boot.img` (`e0fe4010…`) not restored (owner allows this).
 
-**Kernel patches (PR #8):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
-touch (`g54nvt=1`), 0203 keys + PMIC interrupt ack (`g54keys=1`), 0204 no
+**Kernel patches (PR #8 + K24–K26):** 0200 framebuffer, 0201 panic reset, 0202 Novatek
+touch (`g54nvt=1`), 0203 keys + PMIC interrupt ack (`g54keys=1`) + locked SPMI helpers, 0204 no
 debug markers, 0205 layer blending (no visible effect; iOS presents one
-layer), 0206 `g54noexec=a,b` (refuse crash-looping daemons), 0207 PSCI
+layer), 0206 `g54noexec=a,b` (early `EACCES` refusal in `exec_check_permissions()`), 0207 PSCI
 CPU_OFF/SYSTEM_OFF/SYSTEM_RESET, 0208 skip the HFS+ root unmount at halt,
-0209 sync + power off when the halt timer expires.
+0209 sync + power off when the halt timer expires, 0210 USB console (`g54usb=1`),
+0211 MT6685 PMIC RTC (`g54iortc=1` for `"IORTC"`), 0212 `FairPlayIOKit` diagnostic stub (`g54fpstub=1`).
 **[E38](experiments/2026-11-14-e38-halt-timeout.md): 0209 runs (timer fires,
 syncs), but 0207's PSCI calls never executed: `"dsb sy; smc #0"` lost its
 `smc` because `;` is a comment in Apple's arm64 assembler. Fixed in 0207
@@ -97,15 +102,15 @@ restart boots back into iOS (PASS).** A user restart does not keep RAM, so
 the LASTLOG page shows `NO VALID RING` afterwards (the 0201 panic reset
 keeps it).
 
-**Best boot line (E49):** `debug=0xc serial=3 cpus=8 keepsyms=1
+**Best boot line (E63b/K26):** `debug=0xc serial=3 cpus=8 keepsyms=1
 -noprogress rd=ufsroot0 ufsrw=1 rootrw=1 launchd_unsecure_cache=1
 unentitled_ios_sim_launch=1 ignition_level=1 wdt=-1
 wdt_test=no_user_checkin g54panicreset=45 task_wakeups_monitor_rate=0
 dtrace_dof_mode=0 sweetfb_noconsole=1 g54nvt=1 g54keys=1 sweetfb_hz=30
-g54noexec=bluetoothd,fairplayd.H2,InCallService halt_restart_timeout=60
-sweetsample=- g54usb=1` (InCallService refused: issue #14; USB console).
-Kernel K23: `gh run download 43615780625 -R Homura8/g54-xnu -n g54-xnu-kernel -D out/k23`
-(then `--kernel out/k23/kernel.development.sweet`). Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K23>
+g54noexec=bluetoothd,InCallService halt_restart_timeout=60
+sweetsample=- g54iortc=1 g54usb=1` (adds `g54iortc=1` for MT6685 RTC + 26 s boot; keep `fairplayd.H2` out of `g54noexec` until #16/#17 stub work is complete, or include it if desired).
+Kernel K26: `gh run download 43707017931 -R Homura8/g54-xnu -n g54-xnu-kernel -D out/k26`
+(then `--kernel out/k26/kernel.development.sweet`). Build: `scripts/g54_xnu_image.py --topaz out/topaz --kernel <K26>
 --stock out/fw/boot.img --probe out/g1-fast-nolog --ufs --d22ap
 out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 --cmdline "<above>" --out …`. Fast probe: `scripts/g54_payload.py build
@@ -113,13 +118,11 @@ out/ipsw/d22ap.adt --touch-fw out/touch/novatek_ts_fw.bin --ncpu 8
 -D TOUCH_TEST_S=0 -D NO_RESV -D PHASE1_S=1 -D LOADER_S=1` (owner, 14 November:
 no previous-boot log page by default now that the USB console exists; add
 `-D LASTLOG_S=8 -D LASTLOG_RING=… -D LASTLOG_TOTAL=…` only when USB is down;
-ring addresses are
-unchanged K4–K17; **K18–K23: `0x141c7a5f8`/`0x141c7a5f0`**;
+ring addresses: **K18–K23 `0x141c7a5f8`/`0x141c7a5f0`**, **K26 `_sweet_log_ring` `0xfffffe0007c7a5f8` / `_sweet_log_total` `0xfffffe0007c7a5f0`**;
 recompute with `llvm-nm` whenever a kernel changes). Optional second page
 of matching lines: `-D 'LASTLOG_GREP="G54 USB"' -D LASTLOG_GREP_S=30`.
 
-**Next, in order:** (1) ~~USB log channel~~ **done (E47/E48, high speed)**; (2) ~~issue #14~~ **cause found (E48/E49): InCallService**, now refused
-by default; ~~USB screenshots + input + reboot-to-Fastboot~~ **done (E52)**; **[E54](experiments/2026-11-15-e54-ios-audit.md) UI audit logged #15–#22**: ~~#15~~ **fixed in `g54_usb.py` ([E55](experiments/2026-11-15-e55-macos-usb-live-tail.md))**; next: #16–#17/#9/#13 (Photos black, Settings hangs/crashes), #19 (`PosterBoard`/`parsecd`) & #6/#10 composition, #18 networking, #20–#21 driver/log cleanup, #4–#5/#11 (RTC, battery, backlight).
+**Next, in order:** (1) ~~USB log channel~~ **done (E47/E48, high speed)**; (2) ~~issue #14~~ **cause found (E48/E49): InCallService**; ~~USB screenshots + input + reboot-to-Fastboot~~ **done (E52)**; ~~#15~~ **fixed ([E55](experiments/2026-11-15-e55-macos-usb-live-tail.md))**; ~~#4 hardware RTC~~ **fixed with `g54iortc=1` ([E63b](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md))**; next: `#16`/`#17` (`0212` `fairplayd.H2` `sel 22/23/21` investigation from `out/ipsw/chk/fairplayd.H2`), `#20` (`0202` `d[0] == 0xff` idle fix) + `0211` default `"IORTC"` publish, `#9`/`#13` (`About` `AppleMediaServices`/`PassKitCore` hang, `Storage` `PodcastsUI` `SIGTRAP`), `#19` (`PosterBoard`/`parsecd`) & `#6`/`#10` composition, `#18` USB CDC-ECM/NCM host networking, `#5`/`#11` (battery, backlight).
 
 **Process lessons:** MediaTek MUSB interrupt status registers are
 write-1-to-clear (E46/E47); CI's "G54 patches applied" step reverse-checks
@@ -176,24 +179,24 @@ Observed on the E21–E26 iOS boots; keep this list current.
 | 1 | ~~**No touch** in iOS~~ **fixed in E26** | One boot of E27 (unchanged kernel) had **no touch in iOS**; cause unknown. The 0202 start-up chip check ran once and gave up on failure; it now retries until it succeeds and reprograms SPI3 after ~2 s of failed reads. Polled at 8 ms; no IRQ (EINT22), no firmware reload on chip watchdog (FD/FE reports are only counted), probe-side download only |
 | 2 | ~~**No buttons**~~ **fixed in [E28](experiments/2026-11-13-e28-ios-keys.md)** | Kernel 0203 (`g54keys=1`): volume up = KPD `0x1c00e000` KP_MEM1 bit 0; power/volume down = MT6363 TOPSTATUS `0x1e` bits 1/3 over SPMI through the AP channel SWINF 2 (`PMIF 0x1c804000 + 0x880`). Never use SWINF 0 (E27: lost touch). Volume HUD appears on the left (iPhone layout) |
 | 3 | ~~**Garbled framebuffer after the Apple logo and on sleep**~~ **fixed** (E20, E28; owner confirmed 14 November 2026) | The probe drew its info screen into OVL1 L0 (`FE0D0000`, pitch 0x1100) too; it shows whenever iOS hides its OVL0 layer. Fixed in the probe (VRAM cleared before the jump), first used in E29; sleep will then show black with the backlight still on (no backlight driver) |
-| 4 | **Wrong time and date** (Wed 31 Dec, ~4:00) | No RTC driver: the clock starts at the epoch-ish default. Needs the MT6359-family PMIC RTC (SPMI/PWRAP) or a time passed in by the loader |
+| 4 | ~~**Wrong time and date** (Wed 31 Dec, ~4:00)~~ **fixed in [E63b](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md) (K26, `g54iortc=1`)** | Kernel `0211` (`bsd/dev/g54_rtc.c`) reads MT6685 PMIC RTC over SPMI slave 9; with `g54iortc=1` it publishes `"IORTC"`, eliminating the 30 s `IOKitInitializeTime` stall (COM8 ready at 26 s vs 57 s). Next: enable `"IORTC"` by default unless `g54iortc=0` |
 | 5 | **No real battery info** | No fuel-gauge/charger driver for the G54 PMIC; the indicator is a placeholder |
 | 6 | **Composition glitches**: red clock, no wallpaper, white dock, blank widgets | May share one cause (owner's suggestion): missing/incorrect blending or colour format in the software compositor (alpha/premultiplied, BGRA vs RGBA, or CoreAnimation falling back without GPU). Compare with ruby's/topaz screenshots and the SweetFramebuffer pixel format before changing anything |
 | 7 | ~~**Spontaneous restart**~~ **fixed in [E32](experiments/2026-11-13-e32-pmic-ack-ios.md)** after a few minutes (E18, E21) | **Linked to button presses** (E27: same image reset after presses, booted cleanly without; owner saw the same on E18/E21). The reset is below XNU (normal boot, not the loader's Fastboot route). Suspect the MT6363 key long-press/interrupt state (stock regs 0x90f, 0xa0e, 0xa0f); **E28: still resets after presses with the kernel driver on SWINF 2**, so not our channel. E29's probe shows the previous boot's kernel console from RAM (`LASTLOG`) to see what happened before the reset **E29: it is a cold PMIC power cycle** (previous-boot RAM log bit-decayed; warm resets keep it clean). **Owner, 13 November: on battery (no USB power) the same key presses lead, a few minutes later, to a full shutdown instead of a restart; on power-up the log is gone.** So the PMIC powers off after an unserviced key event and only restarts when external power is present. Fix next session (MT6363 key/long-press/interrupt registers) **Cause found and fixed in the probe ([E30](experiments/2026-11-13-e30-pmic-diff.md), [E31](experiments/2026-11-13-e31-pmic-ack.md)):** a power press starts a ~79 s MT6363 countdown (`0xa15–0xa17`) unless the interrupt is acknowledged like the stock PMIC IRQ handler does (write back `0x91b`/`0x91c`, then `0x41b = 1`). Kernel 0203 does this (K5); **E32: keys pressed in iOS, unplugged, phone stays on** |
 | 8 | **~5 fps UI and screen tearing** (E26) | E33–E35 ([run card](experiments/2026-11-13-e33-e35-performance.md)): the panel copy was 10 Hz (`sweetfb_hz=30` helps scrolling only); the A55s already run at 2 GHz; **adding the two A78s (`--ncpu 8 cpus=8`) made iOS noticeably faster (~8 fps)**. Remaining cost: software rendering with no GPU; `bluetoothd`/`fairplayd.H2` relaunch loop (kernel 0206 `g54noexec`) |
-| 9 | **Settings → General → About hangs Settings** (E26, E35) | Tapping About never opens the pane; Settings hangs until force-quit (owner). Probably a blocking call to a missing service (MobileGestalt/baseband/storage, cf. #13); needs logs |
+| 9 | **Settings → General → About hangs Settings** (E26, E35, [E56](experiments/2026-11-15-e56-e60-service-samples.md)) | `E56` sample (`e56-about-smp.log`): `Preferences` threads block inside `AppleMediaServices` (`t1`) and `PreferencesUI` → `PassKitCore` → `libxpc.dylib` (`t3` `mach_msg`) |
 | 10 | **Blur turns solid white after transitions** in App Library and app switcher; Control Center blur is fine (E26) | Composition: static blur layers cached/rendered differently from animated ones; probably the same root as #6 |
 | 11 | **Brightness slider stuck at 50%**, **volume has no effect** (E26) | No backlight driver (panel/`sprd_backlight`/aw99703 in the DTBO) and no audio |
 | 12 | ~~**"Slide to power off" panics → Fastboot**~~ **fixed in E39** (E35) | `SweetCPU::quiesceCPU()` panicked and `PE_halt_restart` was NULL. Kernel 0207: PSCI CPU_OFF / SYSTEM_OFF / SYSTEM_RESET (restart clears the loader's Fastboot reboot-mode). [E36b](experiments/2026-11-13-e36-shutdown.md): shutdown then stalled at `unmount(0) /` (HFS+ root on SWEET UFS) → 30 s `Halt/Restart Timed Out` panic; kernel 0208 skips the root unmount at halt. E37/E37b: iOS teardown itself stalls (launchd waiting on services, `ifnet_detach_final` waiting on `utun2`); kernel 0209 syncs and powers off when the halt timer (`halt_restart_timeout=60`) expires. [E38](experiments/2026-11-14-e38-halt-timeout.md): the timer and sync run, but `Halt/Restart Timed Out @IOPlatformExpert.cpp:900` (0209's fallback) because 0207's `smc` was never assembled (`;` is a comment in Apple's assembler); fixed in 0207 (K12). **[E39](experiments/2026-11-14-e39-shutdown.md): fixed — Shut Down powers off in ~15 s on battery; with USB power the phone restarts after powering off (charger behaviour). Restart from iOS boots back into iOS**  |
-| 13 | **Settings → General → Storage crashes Settings** (E35) | Unknown; needs the crash log (LASTLOG page after a crash, or launchd output) |
+| 13 | **Settings → General → Storage crashes Settings** (E35, [E56](experiments/2026-11-15-e56-e60-service-samples.md)) | `storage-crash.log`: `Preferences[298]` hits `SIGTRAP` (`sig 5`, `reason ns 2 code 0x5`) at `PodcastsUI + 0x8dda8` (`lr +0x8dd10`, `bt +0x5e958`) |
 | 14 | ~~**Volume up + power (power-off menu gesture) wedges SpringBoard**~~ **cause found, worked around (E49)** (E36b, also earlier) | Nothing appears; afterwards apps and the app switcher no longer open, but the home screen still scrolls. The same chord is the screenshot gesture and, held, Emergency SOS: likely a SpringBoard service wait (screenshot/SOS paths) rather than the key driver. Use Settings → General → Shut Down meanwhile. [E40/E41](experiments/2026-11-14-e40-e41-chord-wedge.md): after `key 0xe9 down` + `key 0x30 down` no key event is logged again (no releases, no later presses), so the 0203 key thread most likely blocks in `dispatchEvent` → user-client gate; the SpringBoard sampler is ruled out (E41 `sweetsample=-` still wedges) [E48/E49](experiments/2026-11-14-e48-e49-chord-incallservice.md): keys are fine (all releases delivered); during the chord SpringBoard launches **InCallService** (hosts the power-off/SOS screen in iOS 16), which never finishes without telephony (no CommCenter). With `g54noexec=…,InCallService` no wedge; the power-off screen does not appear |
 | 15 | ~~**`g54_usb.py` on macOS triggers ring replay and desynchronises `seq`** ([E54](experiments/2026-11-15-e54-ios-audit.md))~~ | **Fixed in `g54_usb.py` ([E55](experiments/2026-11-15-e55-macos-usb-live-tail.md)):** `_open_posix()` bounces DTR (`0 -> 1` with RTS cleared, 30 ms settle), discards any buffered pre-open replay up to `G54 USB: port open (live)`, and `Session._drain()` flushes stale lines before sending `ping` |
-| 16 | **Photos (`MobileSlideShow`) stuck on a black screen** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 2:** `exec MobileSlideShow` runs and the foreground home bar/battery render, but the app stays solid black after 7 s with no `CRASH` line; needs userland/IOSurface/framework investigation |
-| 17 | **Settings freezes on `Phone` and `General → Date & Time`** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 3:** Tapping either row leaves it highlighted grey and hangs Settings indefinitely; reopening shows a black screen until force-quit/killed. Same class as #9 (`About`), likely blocking on missing CommCenter/telephony or `timed`/RTC XPC services |
-| 18 | **No networking (`IONetworkController` 0 candidates; Wi-Fi unreachable)** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 4:** `SWEET IOX: class-match IONetworkController -> 0 candidate(s), state=0x4`; Settings → `Wi-Fi Off >` does not open; Safari loads stall and App Store stays on `LOADING`. Needs USB CDC-ECM/NCM host networking or Wi-Fi driver |
+| 16 | **Photos (`MobileSlideShow`) stuck on a black screen** ([E54](experiments/2026-11-15-e54-ios-audit.md), [E64](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md)) | **Cause found (`E64`):** `MobileSlideShow t0` blocks in `PhotoLibraryServicesCore` → `libMobileCheckpoint.dylib` → `MobileSystemServices` → `mach_msg` waiting on `checkpointd`, which hangs calling `fairplayd.H2` MIG `0x4b3` (`1203`). With `0212` (`g54fpstub=1`), `fairplayd.H2` calls `sel 22/23/21` (`552` B) and exits when `sel 21` returns `kIOReturnUnsupported` (`E63`) |
+| 17 | **Settings freezes on `Phone` and `General → Date & Time`** ([E54](experiments/2026-11-15-e54-ios-audit.md), [E63b/E64](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md)) | **Date & Time cause found (`E64`):** `Preferences t0` blocks in `GeneralSettingsUI` → `CoreLocation` → `Foundation`/`libxpc.dylib` waiting on `locationd`, which hangs calling `fairplayd.H2` MIG `0x4b3` (`1203`) (`Date & Time` still freezes with `g54iortc=1` alone). (`Phone` row likely blocks on missing CommCenter/telephony) |
+| 18 | **No networking** ([E54](experiments/2026-11-15-e54-ios-audit.md), [E56–E60](experiments/2026-11-15-e56-e60-service-samples.md)) | `scripts/g54_xnu_image.py` (`ccee111`) now injects `/arm-io/marconi-wifi` (`mac-address-wifi0`), starting `SweetNetwork.cpp` (`IONetworkController` `1 candidate`, notifications sent). No Wi-Fi or USB CDC-ECM/NCM packet transport yet |
 | 19 | **`PosterBoard`, `parsecd`, and `driverkitd` crashes** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 5:** `PosterBoard` crashes at boot (`sig 5`, `ns 2 code 0x5`, likely tied to missing wallpaper in #6); `parsecd` crashes (`sig 5`, `ns 2 code 0x5`) on Spotlight/Safari; `driverkitd` killed by Jetsam (`sig 9`, `ns 1 code 0x7`) |
-| 20 | **High SPI/checksum error rate in Novatek touch driver (`G54 NVT`)** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 6:** `frames 122013 touches 8 spi_err 52044 bad_sum 36920` (~43% `spi_err`, ~30% `bad_sum` on 8 ms SPI3 polling); check SPI3 timing/idle reads/IRQ |
-| 21 | **`bluetoothd` / `fairplayd.H2` respawn + `ReportCrash` spam** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 7:** `g54noexec` refuses `exec`, but `launchd` respawns both >110 times per session and each refusal emits `CRASH` + 10 `SWEET AKS: ReportCrash` lines |
+| 20 | **High SPI/checksum error rate in Novatek touch driver (`G54 NVT`)** ([E54](experiments/2026-11-15-e54-ios-audit.md), [E63b](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md)) | `0202` (K24) raises poll timeout to 10 ms (`+delay(1)`), cutting `spi_err` to `1–82` frames per boot, and separates `idle` from `bad_sum`. **Root cause of remaining `bad_sum` (`6556–26136`) found in `E63b`/`E64`:** idle buffers start with `d[0] == 0xff` followed by non-`0xff` bytes (`ff 78 32 14`), missing `d[0..2] == 0xff`; change check to `d[0] == 0xff` next |
+| 21 | ~~**`bluetoothd` / `fairplayd.H2` respawn + `ReportCrash` spam**~~ **log noise fixed in K24 (`0206`, `E63`)** ([E54](experiments/2026-11-15-e54-ios-audit.md), [E63](experiments/2026-11-15-e61c-e64-k26-rtc-fairplay.md)) | `0206` now refuses `g54noexec` binaries in `exec_check_permissions()` (`EACCES`, capped at 8 log lines) instead of late in `process_signature()`, eliminating `SIGKILL`, `CRASH`, and `ReportCrash` spam |
 | 22 | **App Switcher USB gesture & Spotlight status-bar artifacts** ([E54](experiments/2026-11-15-e54-ios-audit.md)) | **Priority 8:** `swipe` lifts immediately without pause-at-end so it goes Home instead of App Switcher; Spotlight shows a white diagonal-dotted band behind the top status bar and a blank dark App Store suggestion tile; non-core stock apps (Camera, Clock, etc.) are absent from the root build |
 
 ## Previous: fast boot to the iOS lock screen
